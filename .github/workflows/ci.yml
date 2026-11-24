@@ -34,6 +34,11 @@ jobs:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }} ./...
+      - name: Spikes build
+        working-directory: spikes
+        run: |
+          go vet ./...
+          go build ./...
 
   test:
     name: Test (${{ matrix.os }})
