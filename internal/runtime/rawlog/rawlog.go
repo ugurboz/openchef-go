@@ -8,6 +8,7 @@ package rawlog
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,4 +158,35 @@ func ReadFile(path string) ([]Record, error) {
 			return nil, fmt.Errorf("rawlog: read %s: %w", path, err)
 		}
 	}
+}
+
+// LineWriter returns an io.Writer that records each line written to it as a dir entry
+// (typically Stderr). Partial lines are buffered until a newline arrives.
+func (l *Log) LineWriter(dir string) io.Writer { return &lineWriter{log: l, dir: dir} }
+
+type lineWriter struct {
+	mu  sync.Mutex
+	log *Log
+	dir string
+	buf []byte
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.log.Notef(w.dir, "%s", bytes.TrimRight(w.buf[:i], "\r"))
+		w.buf = w.buf[i+1:]
+	}
+	const maxPending = 64 << 10 // never hold an unterminated line forever
+	if len(w.buf) > maxPending {
+		w.log.Notef(w.dir, "%s", w.buf)
+		w.buf = w.buf[:0]
+	}
+	return len(p), nil
 }
