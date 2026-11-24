@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (v0.2: adds §21 unattended mode and sandbox) |
+| **Status** | Accepted (v0.3: adds §7.4 model selection — weights, importance, effort) |
 | **Scope** | v1.0 (MVP) and the contracts later versions must keep |
 | **Audience** | Maintainers and contributors |
 
@@ -324,23 +324,98 @@ for each step not yet verified:
 
 ### 7.3 Routing
 
-Per phase (`plan`, `implement`, `review`, `helper`) the config lists an ordered chain of
-agents. The router picks the first agent whose pool is healthy (§10.3), not cooling down,
-not excluded for this attempt and under its concurrency limit. `review` prefers a pool
-different from the step's author. A user can pin an agent for a task (`--agent opus`) or
+Per phase (`plan`, `implement`, `review`, `helper`) the config lists the agents allowed
+for that phase. The router first filters them: pool healthy (§10.3), not cooling down,
+not excluded for this attempt, under its concurrency limit, and of a tier the step's
+importance permits (§7.4). It then picks among the remaining agents according to the
+selection strategy (§7.4). `review` prefers a provider different from the step's author.
+A user can pin an agent for a task (`--agent opus`) or
 for the TUI session (`/agent opus`), which disables routing but not failover (failover
 asks first when an agent is pinned).
 
-### 7.4 Pipeline phases
+### 7.4 Model selection: weights, importance and effort
+
+Three independent knobs decide *which* model does a step and *how hard* it thinks. Each
+has an automatic default and a user override.
+
+**Tier (per agent).** Every agent declares a capability tier: `frontier` (e.g. Opus,
+the strongest GPT, Gemini Pro-class), `standard`, or `fast` (Haiku, Flash, free models).
+`openchef init` proposes tiers for known models; users can change them.
+
+**Importance (per task and per step).** `low | normal | high | critical`.
+
+- *Automatic:* the planner assigns each step an importance with a one-line reason.
+  OpenChef then raises it to at least `high` for steps whose `files` match the
+  configured sensitive patterns (defaults: authentication, crypto, payments, database
+  migrations, CI/CD and infrastructure config, dependency manifests).
+- *User:* `--importance` sets a floor for the whole task; any step's importance can be
+  changed during plan approval.
+
+Default effect of importance (configurable in `[importance.<level>]`):
+
+| Importance | Allowed tiers | Effort | Review | Extra checks |
+|---|---|---|---|---|
+| `low` | fast, standard | low | none | — |
+| `normal` | standard, frontier | medium | 1 reviewer, other provider | — |
+| `high` | frontier | high | 1 reviewer, other provider, frontier | step must have a verify command |
+| `critical` | frontier | max | 2 reviewers from 2 other providers | verify required; never auto-approved by unattended risk classes, always shown in the report |
+
+If no allowed agent is available (all exhausted), the step waits (`waiting_quota`); it is
+**never silently downgraded** to a lower tier. The user can allow a downgrade per task
+(`--allow-downgrade`).
+
+**Effort.** One normalized scale — `low | medium | high | max` — mapped by each adapter
+to its CLI: Claude `--effort` (`low…max`), Codex the reasoning-effort values the model
+advertises (`model/list`), agy the model variant (`…-low|medium|high`). When a value is
+not supported the adapter uses the nearest lower one and reports it. Effort comes from
+importance unless the agent or the task pins it.
+
+**Selection strategy (per phase).** How the router chooses among the filtered agents:
+
+- `auto` (default): spend the subscriptions the user already pays for evenly, before
+  their windows reset. Each candidate gets a score from its pool's remaining headroom,
+  how soon that headroom resets ("use it or lose it"), recent failure rate, and cost
+  (API pools rank below subscriptions). The highest score wins; ties break by config
+  order.
+- `weighted`: the user sets target shares, e.g. 50 % Opus, 30 % GPT, 20 % Gemini. The
+  router uses smooth weighted round-robin (deterministic, exact shares over time, no
+  randomness). Shares of unavailable agents are redistributed proportionally among the
+  available ones; shares never override tier or health filters.
+- `ordered`: the first available agent in the list (the simple fallback chain).
+
+```toml
+[agents.opus]
+runtime = "claude"
+model   = "claude-opus-5-5"
+pool    = "claude-max"
+tier    = "frontier"
+# effort = "high"   # optional: pin effort for this agent
+
+[routing.implement]
+strategy = "weighted"            # auto | weighted | ordered
+agents   = ["opus", "gpt", "gemini"]
+weights  = { opus = 50, gpt = 30, gemini = 20 }
+
+[importance]
+sensitive = ["**/auth/**", "**/migrations/**", ".github/workflows/**"]
+```
+
+Weight counters are persisted in the store so shares hold across daemon restarts.
+`openchef quota` and the report show the actual distribution next to the target. Users
+override per run with `--agent <name>` (pin), `--strategy <s>`, `--importance <level>` and
+`--effort <level>`, or in the TUI with `/agent`, `/strategy`, `/importance`, `/effort`.
+
+### 7.5 Pipeline phases
 
 - **Plan:** the planner runs in **`plan` permission mode** (read-only by construction,
   not by prompt). It must return JSON matching a published schema
-  (`title`, `steps[]{title, prompt, files[], verify, size}`), requested through the CLI's
+  (`title`, `steps[]{title, prompt, files[], verify, size, importance, reason}`), requested through the CLI's
   structured-output option where available (Claude `--json-schema`, Codex
   `--output-schema` or its app-server equivalent) and validated strictly in every case. One repair turn is allowed on invalid output; then the task fails with the
   raw output attached.
-- **Approve:** the plan is shown in the TUI/CLI. The user can approve, reject or edit it
-  (`openchef plan edit <task>` opens it in `$EDITOR`).
+- **Approve:** the plan is shown in the TUI/CLI with each step's importance, the agent
+  and effort it will get, and the reason. The user can approve, reject or edit it
+  (`openchef plan edit <task>` opens it in `$EDITOR`), including importance per step.
 - **Review:** the reviewer runs in `plan` mode on the diff between the task's base commit
   and its head. Findings are stored and shown; v1 does not auto-fix review findings.
 
@@ -579,10 +654,14 @@ max_concurrent = 2
 runtime = "claude"
 model   = "claude-opus-5-5"
 pool    = "claude-max"
+tier    = "frontier"
 
 [routing.implement]
-chain = ["opus", "gpt", "gemini-opus"]
+strategy = "auto"
+agents   = ["opus", "gpt", "gemini-opus"]
 ```
+
+Model selection keys (`tier`, `strategy`, `weights`, `[importance]`) are described in §7.4.
 
 - **Environment isolation:** subscription-backed sessions get `ANTHROPIC_API_KEY` /
   `OPENAI_API_KEY` / `GEMINI_API_KEY` removed from their environment so they cannot
@@ -705,8 +784,8 @@ Each milestone is one or more pull requests; each PR is reviewable on its own an
 | **M1 Spikes** | §17 spikes, recorded transcripts | Findings merged; §6.3/§9.3 finalized |
 | **M2 Runtimes** | `Runtime`/`Session` contract, `fake`, Claude, Codex, agy adapters, replay tests | One turn + resume works live on each runtime |
 | **M3 Engine** | `run` end to end: worktree, turns, verify, retries, commit, failover, waiting_quota, recovery | Kill-the-daemon test passes; no leaked processes |
-| **M4 Permissions & quota** | Evaluator, shell parsing, approval queue, MCP server for Claude, L1/L2/L3, health, admission | Known bypass cases rejected; routing follows quota |
-| **M5 Pipeline** | Plan (structured), approval, implement, review; `isolated` and `team` modes; merge queue; `merge` | Pipeline completes a multi-step task in both modes |
+| **M4 Permissions, quota & selection** | Evaluator, shell parsing, approval queue, MCP server for Claude, L1/L2/L3, health, admission; tiers, effort mapping, `auto`/`weighted`/`ordered` strategies (§7.4) | Known bypass cases rejected; routing follows quota; weighted shares hold within ±1 step |
+| **M5 Pipeline** | Plan (structured, per-step importance), approval with edits, implement, review (count by importance); `isolated` and `team` modes; merge queue; `merge` | Pipeline completes a multi-step task in both modes; importance changes agent, effort and review |
 | **M6 TUI** | Bubble Tea client | Feature parity with CLI for daily use |
 | **M7 Unattended & sandbox** | §21: unattended mode (risk classes, deferred approvals, keep-awake, report), sandbox backend (container runtime, devcontainer, export) | An overnight pipeline finishes with no human input, locally and in a sandbox, and its result is exported as a branch |
 | **M8 Release** | Docs, examples, security notes, GoReleaser + Homebrew tap, v1.0.0 | Installable via `brew install` and release archives |
