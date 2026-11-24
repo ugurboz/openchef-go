@@ -45,7 +45,9 @@ func StartToken(pid int) (uint64, error) {
 
 func probe(pid int) (token uint64, running bool, err error) {
 	token, state, err := readStat(pid)
-	if errors.Is(err, fs.ErrNotExist) {
+	// ENOENT: no such PID. ESRCH: the process vanished between open and read of its
+	// stat file. Both mean "not running".
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH) {
 		return 0, false, nil
 	}
 	if err != nil {
