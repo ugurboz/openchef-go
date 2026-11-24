@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (v0.5: M1 spike results — `docs/research/m1-findings.md`) |
+| **Status** | Accepted (v0.6: Claude hardening — `--restricted`, decisions D-006…D-011) |
 | **Scope** | v1.0 (MVP) and the contracts later versions must keep |
 | **Audience** | Maintainers and contributors |
 
@@ -238,9 +238,15 @@ Rules every adapter must follow:
 - **Usage and results:** only `result.usage` counts (per-message usage sums to exactly
   twice the turn total). `result.structured_output` carries `--json-schema` output;
   `result.permission_denials` and `total_cost_usd` feed the report.
-- **Isolation:** `--strict-mcp-config --setting-sources local`, so the user's global hooks,
-  plugins and MCP servers do not leak into orchestrated sessions. Users can opt specific
-  MCP servers in through OpenChef config.
+- **Isolation (D-006):** always `--restricted` (no settings files, hence no repository
+  hooks; file tools confined to the working directory; writes to settings/git/tool-config
+  files always reach the host) with an explicit `--tools` allowlist and
+  `--strict-mcp-config`. Web tools are off unless the agent enables them. OpenChef's MCP
+  server exposes only `ask_user`.
+- **Turn correlation (D-009):** one `result` per user message; a turn ends on the result
+  whose per-process `result_index` matches it. Interrupt waits for the owed result;
+  Close kills fast when a turn is in flight (D-010). A per-turn output schema re-spawns
+  the process with `--resume --json-schema` between turns (D-011).
 - **Quota:** L1 from `rate_limit_event` (fractions, epoch resets); L2 probe (§10).
 
 ### 6.3 Codex CLI (`codex`)
@@ -578,12 +584,12 @@ attached. Unanswered requests time out after 15 min as **deny**.
 
 | OpenChef mode | Claude Code | Codex (app-server) | agy (ACP) |
 |---|---|---|---|
-| `manual` | native; every prompt → evaluator | `untrusted` + `workspace-write`; approvals → evaluator | `default`; requests → evaluator |
+| `manual` | native (`--restricted`); every prompt → evaluator | `untrusted` + `workspace-write`; approvals → evaluator | `default`; requests → evaluator |
 | `acceptEdits` | native; host not consulted | file changes accepted, commands → evaluator | `accept-edits` |
-| `plan` | native; `ExitPlanMode` denied | `read-only` sandbox | `plan` |
+| `plan` | `dontAsk` + read-only tools `Read,Glob,Grep` (Claude's plan mode switches models, D-008) | `read-only` sandbox | `plan` |
 | `auto` | native (Claude's classifier); host not consulted | evaluator with `acceptEdits` behaviour | `auto` |
 | `dontAsk` | native (prompts refused) | evaluator, ask → deny | `default`, ask → deny |
-| `bypassPermissions` | native; host not consulted | evaluator: invariants and deny rules only | `auto`, invariants and deny rules only |
+| `bypassPermissions` | `acceptEdits` + approver allows all but deny rules/invariants (`--restricted` refuses bypass, D-008) | evaluator: invariants and deny rules only | `auto`, invariants and deny rules only |
 
 **Deny rules and invariants are enforced in every mode.** For Claude, they are passed as
 native deny rules because the host is not consulted outside `manual` (M1 findings §3);

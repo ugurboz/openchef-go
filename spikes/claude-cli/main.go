@@ -129,6 +129,43 @@ func run(out, only string) error {
 	if want("eof-idle") {
 		s.results = append(s.results, s.eofIdle())
 	}
+	if only == "m17" {
+		m := s.runM17()
+		var sid string
+		if b, err := os.ReadFile(filepath.Join(out, "claude-m17-auto.jsonl")); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				var r struct {
+					Msg struct {
+						Type      string `json:"type"`
+						SessionID string `json:"session_id"`
+					} `json:"msg"`
+				}
+				if json.Unmarshal([]byte(line), &r) == nil && r.Msg.Type == "result" && r.Msg.SessionID != "" {
+					sid = r.Msg.SessionID
+				}
+			}
+		}
+		if sid != "" {
+			m = append(m, s.resumeM17(sid))
+		}
+		scrub, err := rpc.NewTranscript(filepath.Join(work, "scrub17.jsonl"), work)
+		if err != nil {
+			return err
+		}
+		defer scrub.Close()
+		raw, _ := json.MarshalIndent(m, "", "  ")
+		return os.WriteFile(filepath.Join(out, "claude-m17-findings.json"), scrub.ScrubJSON(raw), 0o644)
+	}
+	if only == "m16" {
+		m := s.runM16()
+		scrub, err := rpc.NewTranscript(filepath.Join(work, "scrub16.jsonl"), work)
+		if err != nil {
+			return err
+		}
+		defer scrub.Close()
+		raw, _ := json.MarshalIndent(m, "", "  ")
+		return os.WriteFile(filepath.Join(out, "claude-m16-findings.json"), scrub.ScrubJSON(raw), 0o644)
+	}
 
 	scrub, err := rpc.NewTranscript(filepath.Join(work, "scrub.jsonl"), work)
 	if err != nil {

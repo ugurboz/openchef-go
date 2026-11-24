@@ -71,3 +71,81 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** regression tests `TestStaleNotificationsAreIgnored` and
   `TestImmediateFailureBeforeTurnStarted` (each repeated 20× per run); live test passed
   3/3 afterwards.
+
+## D-006 — Claude sessions always run with `--restricted` and an explicit tool list
+*2026-11-25 · M2.3 · reviewed in two rounds, evidence: m1-findings §9–§10*
+
+- **Context:** without it, a Claude session loads the repository's
+  `.claude/settings.local.json` (hooks run arbitrary shell, extra allow rules, env), hooks
+  outrank the host, and the default tool set includes tools that act outside the turn
+  (`CronCreate`, `RemoteTrigger`, `ScheduleWakeup`, `Monitor`, `Task`, …). In permissive
+  modes none of that reaches OpenChef.
+- **Options:** (a) `--setting-sources local` as before; (b) an empty setting source
+  plus a long `--disallowedTools` list; (c) `--restricted` + `--tools` allowlist.
+- **Challenge (reviewer):** "isolation leaks"; `--tools` might strip `StructuredOutput`
+  and MCP tools; `--restricted` was unverified in combination.
+- **Decision:** (c). Spikes showed `--restricted` ignores settings files (no hook events
+  in restricted sessions), confines file tools to the working directory, and sends
+  writes to settings/git/tool-config files to the host even in `acceptEdits`; it works
+  with `auto`, `dontAsk`, `--resume`, `--mcp-config` and `--json-schema`, and
+  `StructuredOutput` survives `--tools`. Allowlist: `Bash, Read, Edit, Write, Glob,
+  Grep, NotebookEdit, TodoWrite`. Web tools are off by default and enabled per agent
+  (reviewer: exfiltration risk under prompt injection).
+- **Consequences:** `Probe` must fail loudly if a CLI version rejects `--restricted`.
+
+## D-007 — Claude rules: native deny *and* ask; invariants as deny rules; approver re-checks
+*2026-11-25 · M2.3*
+
+- **Context:** outside `manual`, Claude never consults the host, so OpenChef-side rules
+  silently stop applying (reviewer); Bash prefix rules are easy to evade
+  (`git -C . push`, `sh -c '…'`).
+- **Decision:** pass `permissions.deny` (spec deny rules + invariants such as
+  `Write(**/.claude/**)`, `Edit(**/.git/**)`, history-rewriting git) and
+  `permissions.ask` (spec ask rules) natively, plus `permissions.allow` for OpenChef's own
+  `ask_user` tool. The approver applies the §9.2(1) invariants to every request that does
+  reach it (`blocked_path`, `input.file_path`), in every mode. Bash deny rules are
+  documented as best-effort; the kernel keeps authority over git (it owns commits and
+  checks refs before merging, §8.2).
+
+## D-008 — Claude `bypassPermissions` → `acceptEdits` + approver; `plan` → read-only tools
+*2026-11-25 · M2.3*
+
+- **Context:** `--restricted` refuses `bypassPermissions`. Claude's own `plan` mode
+  switched `haiku` to `claude-sonnet-5-5` in every test (~25× cost) and writes plan files
+  under `$HOME/.claude/plans`.
+- **Decision:** `bypassPermissions` runs as `acceptEdits` with the approver allowing
+  whatever is not denied by rules or invariants. OpenChef's `plan` mode runs Claude in
+  `dontAsk` with `--tools Read,Glob,Grep` — read-only by construction, no model switch.
+- **Consequences:** `TurnResult.Models` (from `result.modelUsage`) is reported so any
+  future model drift is visible to routing and cost accounting.
+
+## D-009 — Claude turns are correlated by per-process result counting
+*2026-11-25 · M2.3*
+
+- **Context:** Claude messages carry no turn id; an interrupted turn's late `result`
+  could be credited to the next turn (the D-005 failure mode). Spikes: exactly one
+  `result` per user message, `result_index` increments per turn and restarts at 0 in a
+  resumed process; interrupt returns `still_queued`.
+- **Decision:** the adapter counts user messages written to the current process; a turn
+  ends only on the `result` whose `result_index` equals its ordinal. A new turn is
+  refused while a result is owed. `Interrupt` blocks until the owed result arrives (or
+  10 s pass, then the process is killed and transparently resumed on the next turn).
+  Messages reported in `still_queued` are subtracted.
+
+## D-010 — Claude Close kills fast when a turn is in flight
+*2026-11-25 · M2.3*
+
+- **Context:** after stdin EOF Claude finishes the turn in flight (8.8 s measured), i.e.
+  keeps writing to the worktree while the engine may be committing.
+- **Decision:** idle → close stdin, normal grace. In flight → interrupt, wait ≤ 3 s for the
+  result, then kill the process group without further grace.
+
+## D-011 — Per-turn output schema by transparent re-spawn
+*2026-11-25 · M2.3*
+
+- **Context:** Claude only accepts `--json-schema` at start; the engine sets a schema per
+  turn (planner, reviewer).
+- **Options:** (a) a session-level schema field; (b) re-spawn with `--resume` when the
+  schema changes.
+- **Decision:** (b), only between turns, and back without the schema when a later turn
+  has none. Cost: one process start and likely a prompt-cache miss on that turn.
