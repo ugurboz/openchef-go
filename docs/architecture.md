@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (v0.4: adaptive effort; effort profiles down to two levels) |
+| **Status** | Accepted (v0.5: M1 spike results — `docs/research/m1-findings.md`) |
 | **Scope** | v1.0 (MVP) and the contracts later versions must keep |
 | **Audience** | Maintainers and contributors |
 
@@ -131,9 +131,9 @@ exhausted pool is pointless).
 - Agent processes are placed in their own process group (Unix) or **Job Object** with
   `KILL_ON_JOB_CLOSE` (Windows) so the daemon can stop the whole tree.
 - On Linux the child also gets `Pdeathsig = SIGTERM`.
-- On macOS there is no parent-death signal. Children exit when their stdin pipe reaches
-  EOF (verified for `claude -p`; to be verified for `codex app-server` and `agy acp` —
-  see §17). As a second line of defence, the daemon kills any recorded process group still
+- On macOS there is no parent-death signal. Children react to EOF on their stdin pipe
+  (verified in M1): `codex app-server` and `agy acp` exit within ~50 ms even mid-turn;
+  `claude -p` finishes the turn in flight and then exits. As a second line of defence, the daemon kills any recorded process group still
   alive from a previous daemon instance at startup (PID + start time must both match).
 
 ### 5.2 Why not detach-and-adopt
@@ -220,13 +220,24 @@ Rules every adapter must follow:
   `--resume <id>` in a new process.
 - **Turn end:** the `result` event. Its `is_error`, `subtype` and `usage` define the
   terminal event.
-- **Permissions:** OpenChef passes the session's permission mode (`--permission-mode`)
-  and rules natively, and registers its own stdio MCP server for decisions that would
-  otherwise prompt (`--permission-prompt-tool mcp__openchef__approve`). `AskUserQuestion`
-  is disabled and replaced by `mcp__openchef__ask_user`. The approve tool auto-allows
-  `ask_user` (Phase 0 finding). `--permission-prompt-tool` is verified on 2.1.325 but no
-  longer listed in `claude --help`, which now documents `--permission-prompts host|none`;
-  spike §17.3 confirms which flag is the supported path before M2.
+- **Permissions** (M1 findings §3):
+  - The permission mode is passed natively (`--permission-mode`).
+  - **Deny rules are passed natively** (`--settings '{"permissions":{"deny":[…]}}'`, same
+    syntax as OpenChef's). In `acceptEdits`, `auto` and `bypassPermissions` Claude never
+    consults the host, so only native deny rules are enforced there — and they are, in all
+    three modes.
+  - Decisions that would prompt reach OpenChef through the Agent SDK control protocol:
+    `--permission-prompt-tool stdio` plus an `initialize` control request; requests arrive
+    as `control_request`/`can_use_tool` (with `description`, `blocked_path`,
+    `permission_suggestions`) and are answered with `control_response`. The MCP
+    `--permission-prompt-tool mcp__openchef__approve` path is the fallback.
+  - `AskUserQuestion` is disabled and replaced by OpenChef's `ask_user` MCP tool, which is
+    auto-allowed.
+  - Planner and reviewer sessions run in `plan` mode and OpenChef denies `ExitPlanMode`,
+    so they cannot leave read-only mode.
+- **Usage and results:** only `result.usage` counts (per-message usage sums to exactly
+  twice the turn total). `result.structured_output` carries `--json-schema` output;
+  `result.permission_denials` and `total_cost_usd` feed the report.
 - **Isolation:** `--strict-mcp-config --setting-sources local`, so the user's global hooks,
   plugins and MCP servers do not leak into orchestrated sessions. Users can opt specific
   MCP servers in through OpenChef config.
@@ -234,22 +245,27 @@ Rules every adapter must follow:
 
 ### 6.3 Codex CLI (`codex`)
 
-- **Primary transport: `codex app-server`** (JSON-RPC over stdio). Reasons: it is the only
-  Codex mode with live approvals (`item/commandExecution/requestApproval`,
-  `item/fileChange/requestApproval`), user questions (`item/tool/requestUserInput`),
-  turn lifecycle notifications (`turn/completed`) and first-party rate-limit data
+- **Transport: `codex app-server`** (newline-delimited JSON-RPC over stdio), adopted
+  after the M1 spike (M1 findings §1). It provides live approvals
+  (`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, answered
+  `accept`/`acceptForSession`/`decline`/`cancel`), turn lifecycle (`turn/completed` with
+  `status`), `turn/interrupt`, per-turn `effort` and `outputSchema`, `thread/resume` after
+  a crash, typed turn errors (`codexErrorInfo`: `usageLimitExceeded`,
+  `rateLimitExceeded`, `unauthorized`, …) and first-party rate limits
   (`account/rateLimits/read`, `account/rateLimits/updated`).
+- **Questions:** Codex's own `item/tool/requestUserInput` is unavailable in the default
+  collaboration mode, so OpenChef's `ask_user` MCP server is attached per thread through
+  `thread/start.config.mcp_servers`. Codex asks before each MCP tool call
+  (`mcpServer/elicitation/request`, `codex_approval_kind: "mcp_tool_call"`); the approval
+  service auto-accepts it for OpenChef's own tool and evaluates any other MCP tool.
 - The app-server protocol is marked **experimental** upstream. The adapter pins the
   protocol shapes it uses (generated with `codex app-server generate-json-schema`, stored
   under `internal/runtime/codex/schema/`) and refuses to run on a mismatch.
 - **Fallback transport: `codex exec --json` + `codex exec resume --json <thread_id>`**,
   one process per turn, verified in Phase 0. It has no live approvals, so it only runs in
   modes where no prompt is needed (`plan` → `--sandbox read-only`, `acceptEdits`/`auto`
-  → `--sandbox workspace-write`). Selected automatically when the app-server handshake
-  fails, and reported by `openchef doctor`.
-- **Decision gate:** the app-server transport is adopted only after the spike in §17
-  passes. If it fails, Codex ships in v1 with the `exec` transport and the restriction
-  above.
+  → `--sandbox workspace-write`). It is used only when the app-server handshake fails,
+  and `openchef doctor` reports it.
 
 ### 6.4 Antigravity (`agy`)
 
@@ -257,8 +273,9 @@ Rules every adapter must follow:
   which runs sandboxed commands without asking and reports success on failure.
 - **Flags:** `--sandbox --disable-telemetry --include-default-customizations=false
   --cli_dir_name openchef`.
-- **Session:** `session/new` (+ `session/set_model`), `session/prompt` per turn,
-  `session/load` for `Resume`.
+- **Session:** `session/new`, then `session/set_config_option` for `model` (base name,
+  e.g. `gemini-4-neon`), `thought_level` (effort: `low`…`xhigh`) and `mode`;
+  `session/prompt` per turn; `session/load` for `Resume`.
 - **Permissions:** `session/request_permission` is routed to the approval service; the
   ACP session mode is set from the OpenChef permission mode (§9.3). The sandbox always
   stays on.
@@ -561,12 +578,21 @@ attached. Unanswered requests time out after 15 min as **deny**.
 
 | OpenChef mode | Claude Code | Codex (app-server) | agy (ACP) |
 |---|---|---|---|
-| `manual` | native | approvals → evaluator | `default` + requests → evaluator |
-| `acceptEdits` | native | file changes auto, commands → evaluator | `accept-edits` |
-| `plan` | native | read-only sandbox | `plan` |
-| `auto` | native (Claude's classifier) | evaluator with `acceptEdits` behaviour | `auto` |
-| `dontAsk` | native | evaluator, ask → deny | `default`, ask → deny |
-| `bypassPermissions` | native | evaluator: invariants only | `auto`, invariants only |
+| `manual` | native; every prompt → evaluator | `untrusted` + `workspace-write`; approvals → evaluator | `default`; requests → evaluator |
+| `acceptEdits` | native; host not consulted | file changes accepted, commands → evaluator | `accept-edits` |
+| `plan` | native; `ExitPlanMode` denied | `read-only` sandbox | `plan` |
+| `auto` | native (Claude's classifier); host not consulted | evaluator with `acceptEdits` behaviour | `auto` |
+| `dontAsk` | native (prompts refused) | evaluator, ask → deny | `default`, ask → deny |
+| `bypassPermissions` | native; host not consulted | evaluator: invariants and deny rules only | `auto`, invariants and deny rules only |
+
+**Deny rules and invariants are enforced in every mode.** For Claude, they are passed as
+native deny rules because the host is not consulted outside `manual` (M1 findings §3);
+for Codex and agy, the evaluator sees every request. Built-in invariants that cannot be
+expressed as Claude rules (e.g. "no writes outside the workspace") rely on Claude's own
+working-directory boundary in `acceptEdits`, which is why `bypassPermissions` is only
+allowed in worktrees or the sandbox; in `auto` they rely on Claude's classifier. This is
+a known limitation of driving Claude in non-`manual` modes, to be measured in M2 with
+out-of-workspace write attempts and documented for users.
 
 Where a runtime has no equivalent, OpenChef chooses the **stricter** behaviour and
 documents it. `bypassPermissions` requires an explicit flag per task and is refused when
@@ -777,7 +803,9 @@ testdata/                recorded CLI transcripts (replay fixtures)
 ## 17. Verification before code (spikes)
 
 These questions decide details above and must be answered first, each with a short
-findings note in `docs/research/` and recorded transcripts in `testdata/`:
+findings note in `docs/research/` and recorded transcripts in `testdata/`. Status after
+M1 (`docs/research/m1-findings.md`): 1, 2 (macOS), 3 and 5 answered; 4 deferred until a
+logged-in Windows machine is available.
 
 1. **Codex app-server:** start/resume a thread, run a turn, receive and answer a command
    approval and a file-change approval, receive `requestUserInput`, read and receive rate
