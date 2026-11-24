@@ -1,0 +1,53 @@
+# GoReleaser configuration. CI only validates it and builds snapshots; publishing
+# (GitHub Releases, Homebrew tap, signatures) is added in milestone M7.
+version: 2
+
+project_name: openchef
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: openchef
+    main: ./cmd/openchef
+    binary: openchef
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/ugurboz/openchef/internal/buildinfo.version={{ .Version }}
+      - -X github.com/ugurboz/openchef/internal/buildinfo.commit={{ .FullCommit }}
+      - -X github.com/ugurboz/openchef/internal/buildinfo.date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
