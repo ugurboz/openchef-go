@@ -7,6 +7,7 @@ on:
     paths:
       - "internal/procs/**"
       - "internal/store/**"
+      - "internal/runtime/**"
       - ".github/workflows/stress.yml"
   workflow_dispatch:
     inputs:
@@ -40,4 +41,4 @@ jobs:
         shell: bash
         env:
           COUNT: ${{ inputs.count || '50' }}
-        run: go test -race -count="$COUNT" ./internal/procs/... ./internal/store/...
+        run: go test -race -count="$COUNT" ./internal/procs/... ./internal/store/... ./internal/runtime/...
