@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft for review (v0.1) |
+| **Status** | Accepted (v0.2: adds §21 unattended mode and sandbox) |
 | **Scope** | v1.0 (MVP) and the contracts later versions must keep |
 | **Audience** | Maintainers and contributors |
 
@@ -41,6 +41,8 @@ exhausted, the task waits and resumes automatically after the earliest reset.
 - **G4 — Subscription-first.** Use the plans people already pay for (Claude Pro/Max,
   ChatGPT Plus/Pro, Google AI Pro). API keys are supported but never used by accident.
 - **G5 — Portable.** One static binary for macOS, Linux and Windows.
+- **G6 — Walk away.** A user can approve a plan, leave the machine, and come back to a
+  finished, verified result plus a report of everything that needs their attention (§21).
 
 ### 1.2 Non-goals (v1)
 
@@ -349,7 +351,8 @@ asks first when an agent is pinned).
 ### 8.1 Modes
 
 The user picks the mode per task (`--mode isolated|team`, default from config:
-`isolated`).
+`isolated`). Independently, the task picks an execution backend: `local` (default,
+worktrees on the host as described here) or `sandbox` (a container, §21.3).
 
 - **`isolated`** — one git worktree per task on branch `openchef/<task-id>`, created from
   the user's current `HEAD`. All steps run sequentially in it. When the task is done the
@@ -526,6 +529,10 @@ openchef logs <task|session> -f   # follow normalized events
 openchef approve|deny <id> / openchef answer <id> "<text>"
 openchef retry|cancel <task>
 openchef merge <task>             # bring a finished branch into the current branch
+openchef pipeline "<request>" --unattended [--sandbox]   # walk-away run (§21)
+openchef export <task> [--patch | --to <dir>]          # results out of a sandbox
+openchef deferred [approve|reject <id>]                # critical requests held back
+openchef report <task>                                 # what happened while away
 openchef attach <session>         # open the session in its native CLI (resume)
 openchef quota [--refresh]        # pools, windows, resets
 openchef init                     # detect installed CLIs, create ~/.openchef/config.toml
@@ -659,6 +666,16 @@ findings note in `docs/research/` and recorded transcripts in `testdata/`:
 5. **Structured plan output:** schema-valid JSON from each planner (Claude
    `--json-schema`, Codex `--output-schema`; agy prompt + validation + one repair turn).
 
+Spikes for §21, run at the start of M7 rather than in M1:
+
+6. **Headless auth in a container:** Claude (`claude setup-token`), Codex
+   (`codex login --device-auth` or a copied `auth.json`), agy (no headless login flag is
+   documented in `agy --help`; find a supported way or exclude agy from the sandbox).
+7. **Agents through `docker exec -i`:** stdin EOF, signal and exit semantics through the
+   container runtime, and container cleanup when the daemon dies.
+8. **Keep-awake:** `caffeinate -i`, `systemd-inhibit`, `SetThreadExecutionState`
+   behaviour on battery and with the lid closed.
+
 ---
 
 ## 18. Testing strategy
@@ -691,7 +708,8 @@ Each milestone is one or more pull requests; each PR is reviewable on its own an
 | **M4 Permissions & quota** | Evaluator, shell parsing, approval queue, MCP server for Claude, L1/L2/L3, health, admission | Known bypass cases rejected; routing follows quota |
 | **M5 Pipeline** | Plan (structured), approval, implement, review; `isolated` and `team` modes; merge queue; `merge` | Pipeline completes a multi-step task in both modes |
 | **M6 TUI** | Bubble Tea client | Feature parity with CLI for daily use |
-| **M7 Release** | Docs, examples, security notes, GoReleaser + Homebrew tap, v1.0.0 | Installable via `brew install` and release archives |
+| **M7 Unattended & sandbox** | §21: unattended mode (risk classes, deferred approvals, keep-awake, report), sandbox backend (container runtime, devcontainer, export) | An overnight pipeline finishes with no human input, locally and in a sandbox, and its result is exported as a branch |
+| **M8 Release** | Docs, examples, security notes, GoReleaser + Homebrew tap, v1.0.0 | Installable via `brew install` and release archives |
 
 ---
 
@@ -705,3 +723,91 @@ Each milestone is one or more pull requests; each PR is reviewable on its own an
 | Windows behaviour differs (sandboxes, process trees) | Spike before commitment; Windows in CI from M0 |
 | "Chef" trademark confusion | Positioned as an AI agent orchestrator; no visual or naming overlap with Chef/Progress |
 | Scope creep | Non-goals in §1.2; new features need an amendment to this document |
+| Unattended runs approve something harmful | Deterministic risk classes; critical requests are deferred, never auto-approved outside a sandbox; deny rules always win |
+| Sandbox auth unsupported by a CLI (agy) | Spike §17.6 first; a runtime without headless auth is excluded from sandbox routing, not faked |
+
+---
+
+## 21. Unattended mode and sandbox
+
+Scenario: the user starts a pipeline, approves the plan, and leaves (or the machine is
+left overnight). OpenChef finishes the task without blocking on the human, and on return
+the user finds a verified result and a report. Both features are **optional**.
+
+### 21.1 Unattended mode (`--unattended`)
+
+Plan approval still happens up front, while the user is present. After that, nothing may
+block on a human:
+
+- **Keep-awake** while the task is active: `caffeinate -i` (macOS),
+  `systemd-inhibit --what=idle:sleep` (Linux), `SetThreadExecutionState` (Windows).
+  `openchef doctor` warns about conditions that still sleep the machine (e.g. a closed
+  laptop lid on battery).
+- **Questions** (`ask_user`) get an immediate answer telling the agent the user is away,
+  to make the most reasonable documented assumption, and to note it; each assumption is
+  recorded for the report.
+- **Approvals** are decided by OpenChef using deterministic risk classes (§21.2) instead
+  of waiting. Deny rules and built-in invariants (§9.2) apply unchanged.
+- **Quota exhaustion** keeps the existing behaviour: failover, else `waiting_quota` with
+  automatic resume at reset.
+- **Verification failures** past the retry limit put only that step in
+  `needs_attention`; independent steps (team mode) continue.
+
+### 21.2 Risk classes and deferred approvals
+
+Every request that would otherwise `ask` is classified without an LLM, using the parsed
+command (§9.2) and resolved paths:
+
+| Class | Examples | Unattended decision |
+|---|---|---|
+| **routine** | reads and edits inside the workspace; build, test, lint, format commands; read-only git; file utilities confined to the workspace | **approved by OpenChef** and logged |
+| **critical** | network access (`curl`, `wget`, `ssh`, `git push`), package installs and lockfile changes, writes or deletes outside the workspace, recursive deletes, `sudo`/privilege changes, environment or credential access, anything unparseable | **deferred** |
+
+A **deferred** request is denied for now with a message to the agent ("this needs the
+user; it has been deferred — continue with the remaining work and leave a clear TODO"),
+and stored with its full context (step, session, command, reason). On return the user
+reviews the deferred queue: `openchef deferred` lists it; approving an item makes OpenChef
+resume that step's session with the approval and a turn that completes the deferred part,
+then re-verify. Rejecting it closes the item.
+
+Users tune the classes with the same rule syntax as §9.1:
+
+```toml
+[unattended]
+routine  = ["Bash(make *)", "Bash(npm run *)"]
+critical = ["Bash(docker *)"]
+```
+
+For Claude sessions in `auto` mode, Claude's own classifier still runs first; OpenChef's
+classes apply to whatever reaches the permission tool.
+
+### 21.3 Sandbox backend (`--sandbox`)
+
+- **What:** each task runs in its own container. A full VM is not used: on macOS the
+  supported container runtimes already run inside a lightweight VM.
+- **Runtimes:** any Docker-compatible CLI (Docker, Podman, OrbStack, Colima), detected by
+  `openchef doctor`.
+- **Environment:** the project's `.devcontainer/devcontainer.json` if present (the format
+  VS Code and Codespaces use), otherwise the OpenChef base image with `claude`, `codex`,
+  `agy` and common toolchains.
+- **Isolation:** the repository is **cloned** into a container volume, never bind-mounted.
+  Nothing on the host is writable from inside.
+- **Permissions:** default mode inside the sandbox is `bypassPermissions`; isolation is the
+  safety boundary. Deny rules still apply.
+- **Network:** open by default (agents need model APIs and package registries). An egress
+  allowlist is a later option.
+- **Auth:** subscription credentials enter as headless tokens (§17.6), passed as secrets
+  at container start, never baked into images or written to the volume.
+- **Process model:** the daemon stays on the host; agents run via `docker exec -i` and are
+  supervised by `internal/procs` like local ones. Containers carry an `openchef.task`
+  label; the daemon removes containers of terminal tasks and sweeps orphans at startup.
+- **Export:** `openchef export <task>` fetches the task's branch from the container into
+  the user's repository as `openchef/<task-id>` (then `openchef merge` as usual).
+  `--patch` and `--to <dir>` export a patch file or a plain copy instead.
+
+### 21.4 Report
+
+When an unattended task finishes or stops, OpenChef sends an OS notification and writes
+a report (`openchef report <task>`, also shown in the TUI): steps and their verification,
+failovers and quota waits, approvals OpenChef granted, deferred items, assumptions agents
+made, review findings, and how to export or merge.
