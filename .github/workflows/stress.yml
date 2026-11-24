@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "internal/procs/**"
+      - "internal/store/**"
       - ".github/workflows/stress.yml"
   workflow_dispatch:
     inputs:
@@ -22,8 +23,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  procs:
-    name: Stress procs (${{ matrix.os }})
+  stress:
+    name: Stress (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -39,4 +40,4 @@ jobs:
         shell: bash
         env:
           COUNT: ${{ inputs.count || '50' }}
-        run: go test -race -count="$COUNT" ./internal/procs/...
+        run: go test -race -count="$COUNT" ./internal/procs/... ./internal/store/...
