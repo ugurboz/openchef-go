@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (v0.3: adds §7.4 model selection — weights, importance, effort) |
+| **Status** | Accepted (v0.4: adaptive effort; effort profiles down to two levels) |
 | **Scope** | v1.0 (MVP) and the contracts later versions must keep |
 | **Audience** | Maintainers and contributors |
 
@@ -370,28 +370,46 @@ to its CLI: Claude `--effort` (`low…max`), Codex the reasoning-effort values t
 advertises (`model/list`), agy the model variant (`…-low|medium|high`). When a value is
 not supported the adapter uses the nearest lower one and reports it.
 
-Higher effort costs many more tokens, and most users are on entry plans (Claude Pro,
-ChatGPT Plus) where that matters. Effort is therefore resolved in three steps:
+Importance and effort are deliberately separate: importance describes the *work* (how
+much a mistake would hurt) and never changes with quota; effort describes how many tokens
+the model may spend thinking, and that is what OpenChef adapts. Higher effort costs many
+more tokens, and most users are on entry plans (Claude Pro, ChatGPT Plus) where that
+matters. Effort is resolved in three steps:
 
 1. **Base** from importance (table above).
-2. **Profile** shift, per pool or globally: `economy` (one level down), `balanced` (as in
-   the table), `quality` (one level up). `openchef init` picks the profile from the
-   subscription tier: Free/Pro/Plus → `economy`, Max/Ultra (and API pools with a budget)
-   → `balanced`. The user can change it at any time (`effort_profile` in config,
-   `--effort-profile`, `/effort-profile`).
-3. **Quota pressure:** when the pool is `yellow` or `red` (§10.3), effort drops one more
-   level, so more of the remaining work fits before the reset.
+2. **Profile** shift, per pool or globally:
 
-The result is clamped to `low…high`; `max` is only ever used when the user pins it
-(`--effort max`, agent or task config) or the `quality` profile lifts a `high` step.
-An explicit pin (agent, task or `--effort`) skips steps 2 and 3.
+   | Profile | Shift | Intended for |
+   |---|---|---|
+   | `minimal` | −2 | Tight quota; cheapest possible runs |
+   | `economy` | −1 | Entry plans (Free, Claude Pro, ChatGPT Plus) |
+   | `balanced` | 0 | Large plans (Max, Ultra) and budgeted API pools |
+   | `quality` | +1 | Users who prefer quality over quota |
+   | `auto` (default) | plan-based start, then adaptive | Everyone who does not want to think about it |
 
-| Importance | economy | balanced | quality |
-|---|---|---|---|
-| `low` | low | low | medium |
-| `normal` | low | medium | high |
-| `high` | medium | high | max |
-| `critical` | medium | high | max |
+   `auto` starts at `economy` on entry plans and `balanced` on large ones (from the plan
+   tier recorded by `openchef init`), then adapts continuously to quota (step 3).
+3. **Quota adaptation** (only in `auto`): the pool's state moves effort one level:
+   - **pressure** — pool `yellow` or `red` (§10.3): −1, so more of the remaining work fits
+     before the reset;
+   - **surplus** — pool `green` and the quota model projects that at least 40 % of the
+     current window will go unused at its reset: +1, so paid capacity is not wasted.
+
+The result is clamped to `low…max`. `max` is reached automatically only through
+`quality` or a surplus on a pool whose start is `balanced`; on entry plans automatic
+effort never exceeds `high`. An explicit pin (agent, task or `--effort`) bypasses steps 2
+and 3. Every effective effort, and why it was chosen, is visible in plan approval,
+`openchef status` and the report.
+
+| Importance | minimal | economy | balanced | quality |
+|---|---|---|---|---|
+| `low` | low | low | low | medium |
+| `normal` | low | low | medium | high |
+| `high` | low | medium | high | max |
+| `critical` | low | medium | high | max |
+
+In the sandbox backend (§21.3) `critical` gets no special handling beyond `high`: the
+container is the safety boundary, so the extra warnings and highlighting are dropped.
 
 **Selection strategy (per phase).** How the router chooses among the filtered agents:
 
@@ -420,7 +438,8 @@ agents   = ["opus", "gpt", "gemini"]
 weights  = { opus = 50, gpt = 30, gemini = 20 }
 
 [pools.claude-pro]
-effort_profile = "economy"       # set by init from the plan; economy | balanced | quality
+effort_profile = "auto"          # auto | minimal | economy | balanced | quality
+plan_tier      = "pro"           # recorded by init; drives the auto start level
 
 [importance]
 sensitive = ["**/auth/**", "**/migrations/**", ".github/workflows/**"]
