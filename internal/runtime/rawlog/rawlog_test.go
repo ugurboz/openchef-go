@@ -1,10 +1,12 @@
 package rawlog
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -116,5 +118,28 @@ func TestFixturesAreReadable(t *testing.T) {
 		if recv == 0 {
 			t.Errorf("%s: no received protocol messages", f)
 		}
+	}
+}
+
+type bufCloser struct{ bytes.Buffer }
+
+func (*bufCloser) Close() error { return nil }
+
+func TestLineWriter(t *testing.T) {
+	t.Parallel()
+	var buf bufCloser
+	log := New(&buf)
+	w := log.LineWriter(Stderr)
+	for _, chunk := range []string{"first li", "ne\nsecond\r\nthird"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"text":"first line"`) || !strings.Contains(out, `"text":"second"`) {
+		t.Fatalf("lines not split correctly:\n%s", out)
+	}
+	if strings.Contains(out, "third") {
+		t.Fatalf("unterminated line must wait for its newline:\n%s", out)
 	}
 }
