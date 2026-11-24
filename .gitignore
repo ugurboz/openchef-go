@@ -1,0 +1,21 @@
+# Build output
+/dist/
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local state and secrets
+.env
+.env.*
+/.openchef/

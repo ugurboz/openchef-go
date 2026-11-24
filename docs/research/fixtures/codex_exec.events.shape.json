@@ -1,0 +1,27 @@
+{
+  "thread.started": {
+    "type": "str",
+    "thread_id": "str"
+  },
+  "turn.started": {
+    "type": "str"
+  },
+  "item.completed": {
+    "type": "str",
+    "item": {
+      "id": "str",
+      "type": "str",
+      "text": "str"
+    }
+  },
+  "turn.completed": {
+    "type": "str",
+    "usage": {
+      "input_tokens": "int",
+      "cached_input_tokens": "int",
+      "cache_write_input_tokens": "int",
+      "output_tokens": "int",
+      "reasoning_output_tokens": "int"
+    }
+  }
+}

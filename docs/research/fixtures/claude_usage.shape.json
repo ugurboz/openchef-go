@@ -1,0 +1,105 @@
+{
+  "five_hour": {
+    "utilization": "float",
+    "resets_at": "str",
+    "limit_dollars": "NoneType",
+    "used_dollars": "NoneType",
+    "remaining_dollars": "NoneType",
+    "locked_reason": "NoneType"
+  },
+  "seven_day": {
+    "utilization": "float",
+    "resets_at": "str",
+    "limit_dollars": "NoneType",
+    "used_dollars": "NoneType",
+    "remaining_dollars": "NoneType",
+    "locked_reason": "NoneType"
+  },
+  "seven_day_oauth_apps": "NoneType",
+  "seven_day_opus": "NoneType",
+  "seven_day_sonnet": "NoneType",
+  "seven_day_cowork": "NoneType",
+  "seven_day_omelette": "NoneType",
+  "tangelo": "NoneType",
+  "iguana_necktie": "NoneType",
+  "omelette_promotional": "NoneType",
+  "nimbus_quill": "NoneType",
+  "cinder_cove": "NoneType",
+  "copper_kite": "NoneType",
+  "brass_thimble": "NoneType",
+  "harbor_lantern": "NoneType",
+  "maple_sundial": "NoneType",
+  "wattle_ember": "NoneType",
+  "promo_credits": "NoneType",
+  "amber_ladder": "NoneType",
+  "granite_teacup": "NoneType",
+  "amber_cistern": "NoneType",
+  "amber_cistern_offer": "NoneType",
+  "juniper_tide": "NoneType",
+  "cedar_ember": "NoneType",
+  "starry_waterfall": "NoneType",
+  "amber_gauge": "NoneType",
+  "pace": "NoneType",
+  "indicator": "NoneType",
+  "message_limit": "NoneType",
+  "usage_scopes": "NoneType",
+  "extra_usage": {
+    "is_enabled": "bool",
+    "monthly_limit": "NoneType",
+    "used_credits": "NoneType",
+    "utilization": "NoneType",
+    "currency": "NoneType",
+    "decimal_places": "NoneType",
+    "disabled_reason": "NoneType",
+    "user_disabled": "bool",
+    "spend_limit_reached": "bool",
+    "credits_can_pay": "str",
+    "credits_ever_enabled": "bool",
+    "daily": "NoneType",
+    "weekly": "NoneType"
+  },
+  "limits": [
+    {
+      "kind": "str",
+      "group": "str",
+      "percent": "int",
+      "severity": "str",
+      "resets_at": "str",
+      "scope": "NoneType",
+      "is_active": "bool"
+    }
+  ],
+  "spend": {
+    "used": {
+      "amount_minor": "int",
+      "currency": "str",
+      "exponent": "int"
+    },
+    "limit": "NoneType",
+    "percent": "int",
+    "severity": "str",
+    "enabled": "bool",
+    "disabled_reason": "NoneType",
+    "cap": "NoneType",
+    "balance": "NoneType",
+    "auto_reload": "NoneType",
+    "disclaimer": "str",
+    "can_purchase_credits": "bool",
+    "can_toggle": "bool"
+  },
+  "member_dashboard_available": "bool",
+  "usage_credits_settings_path": "NoneType",
+  "seven_day_breakdown": {
+    "as_of": "str",
+    "window_started_at": "str",
+    "rows": [
+      {
+        "key": "str",
+        "display_name": "str",
+        "percent": "int",
+        "percent_of_limit": "int"
+      }
+    ]
+  },
+  "weekly_scoped_shares": "NoneType"
+}
