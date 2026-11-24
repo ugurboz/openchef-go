@@ -351,14 +351,15 @@ the strongest GPT, Gemini Pro-class), `standard`, or `fast` (Haiku, Flash, free 
 - *User:* `--importance` sets a floor for the whole task; any step's importance can be
   changed during plan approval.
 
-Default effect of importance (configurable in `[importance.<level>]`):
+Default effect of importance (configurable in `[importance.<level>]`). Effort here is
+the `balanced` profile; see the effort profiles below.
 
-| Importance | Allowed tiers | Effort | Review | Extra checks |
+| Importance | Allowed tiers | Effort (balanced) | Review | Extra checks |
 |---|---|---|---|---|
 | `low` | fast, standard | low | none | — |
 | `normal` | standard, frontier | medium | 1 reviewer, other provider | — |
-| `high` | frontier | high | 1 reviewer, other provider, frontier | step must have a verify command |
-| `critical` | frontier | max | 2 reviewers from 2 other providers | verify required; never auto-approved by unattended risk classes, always shown in the report |
+| `high` | frontier | high | 1 reviewer, other provider | plan approval warns if the step has no verify command |
+| `critical` | frontier | high | 1 frontier reviewer, other provider (a second reviewer is opt-in: `reviewers = 2`) | same warning; highlighted in plan approval and in the report |
 
 If no allowed agent is available (all exhausted), the step waits (`waiting_quota`); it is
 **never silently downgraded** to a lower tier. The user can allow a downgrade per task
@@ -367,8 +368,30 @@ If no allowed agent is available (all exhausted), the step waits (`waiting_quota
 **Effort.** One normalized scale — `low | medium | high | max` — mapped by each adapter
 to its CLI: Claude `--effort` (`low…max`), Codex the reasoning-effort values the model
 advertises (`model/list`), agy the model variant (`…-low|medium|high`). When a value is
-not supported the adapter uses the nearest lower one and reports it. Effort comes from
-importance unless the agent or the task pins it.
+not supported the adapter uses the nearest lower one and reports it.
+
+Higher effort costs many more tokens, and most users are on entry plans (Claude Pro,
+ChatGPT Plus) where that matters. Effort is therefore resolved in three steps:
+
+1. **Base** from importance (table above).
+2. **Profile** shift, per pool or globally: `economy` (one level down), `balanced` (as in
+   the table), `quality` (one level up). `openchef init` picks the profile from the
+   subscription tier: Free/Pro/Plus → `economy`, Max/Ultra (and API pools with a budget)
+   → `balanced`. The user can change it at any time (`effort_profile` in config,
+   `--effort-profile`, `/effort-profile`).
+3. **Quota pressure:** when the pool is `yellow` or `red` (§10.3), effort drops one more
+   level, so more of the remaining work fits before the reset.
+
+The result is clamped to `low…high`; `max` is only ever used when the user pins it
+(`--effort max`, agent or task config) or the `quality` profile lifts a `high` step.
+An explicit pin (agent, task or `--effort`) skips steps 2 and 3.
+
+| Importance | economy | balanced | quality |
+|---|---|---|---|
+| `low` | low | low | medium |
+| `normal` | low | medium | high |
+| `high` | medium | high | max |
+| `critical` | medium | high | max |
 
 **Selection strategy (per phase).** How the router chooses among the filtered agents:
 
@@ -396,14 +419,18 @@ strategy = "weighted"            # auto | weighted | ordered
 agents   = ["opus", "gpt", "gemini"]
 weights  = { opus = 50, gpt = 30, gemini = 20 }
 
+[pools.claude-pro]
+effort_profile = "economy"       # set by init from the plan; economy | balanced | quality
+
 [importance]
 sensitive = ["**/auth/**", "**/migrations/**", ".github/workflows/**"]
 ```
 
 Weight counters are persisted in the store so shares hold across daemon restarts.
 `openchef quota` and the report show the actual distribution next to the target. Users
-override per run with `--agent <name>` (pin), `--strategy <s>`, `--importance <level>` and
-`--effort <level>`, or in the TUI with `/agent`, `/strategy`, `/importance`, `/effort`.
+override per run with `--agent <name>` (pin), `--strategy <s>`, `--importance <level>`,
+`--effort <level>` and `--effort-profile <p>`, or in the TUI with `/agent`, `/strategy`,
+`/importance`, `/effort`, `/effort-profile`.
 
 ### 7.5 Pipeline phases
 
@@ -785,7 +812,7 @@ Each milestone is one or more pull requests; each PR is reviewable on its own an
 | **M2 Runtimes** | `Runtime`/`Session` contract, `fake`, Claude, Codex, agy adapters, replay tests | One turn + resume works live on each runtime |
 | **M3 Engine** | `run` end to end: worktree, turns, verify, retries, commit, failover, waiting_quota, recovery | Kill-the-daemon test passes; no leaked processes |
 | **M4 Permissions, quota & selection** | Evaluator, shell parsing, approval queue, MCP server for Claude, L1/L2/L3, health, admission; tiers, effort mapping, `auto`/`weighted`/`ordered` strategies (§7.4) | Known bypass cases rejected; routing follows quota; weighted shares hold within ±1 step |
-| **M5 Pipeline** | Plan (structured, per-step importance), approval with edits, implement, review (count by importance); `isolated` and `team` modes; merge queue; `merge` | Pipeline completes a multi-step task in both modes; importance changes agent, effort and review |
+| **M5 Pipeline** | Plan (structured, per-step importance), approval with edits, implement, review (by importance); `isolated` and `team` modes; merge queue; `merge` | Pipeline completes a multi-step task in both modes; importance and effort profile change agent, effort and review as specified |
 | **M6 TUI** | Bubble Tea client | Feature parity with CLI for daily use |
 | **M7 Unattended & sandbox** | §21: unattended mode (risk classes, deferred approvals, keep-awake, report), sandbox backend (container runtime, devcontainer, export) | An overnight pipeline finishes with no human input, locally and in a sandbox, and its result is exported as a branch |
 | **M8 Release** | Docs, examples, security notes, GoReleaser + Homebrew tap, v1.0.0 | Installable via `brew install` and release archives |
