@@ -6,6 +6,9 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ugurboz/openchef/internal/config"
+	"github.com/ugurboz/openchef/internal/doctor"
 )
 
 // IO holds the streams commands write to. Tests pass buffers; main passes os.Stdout/Stderr.
@@ -14,8 +17,24 @@ type IO struct {
 	Err io.Writer
 }
 
-// NewRootCommand builds the full command tree.
+// Deps are the environment dependencies of commands, replaceable in tests.
+type Deps struct {
+	Detector doctor.Detector
+	Paths    func() (config.Paths, error)
+}
+
+// DefaultDeps uses the real environment.
+func DefaultDeps() Deps {
+	return Deps{Detector: doctor.New(), Paths: config.ResolvePaths}
+}
+
+// NewRootCommand builds the full command tree against the real environment.
 func NewRootCommand(streams IO) *cobra.Command {
+	return NewRootCommandWith(streams, DefaultDeps())
+}
+
+// NewRootCommandWith builds the command tree with explicit dependencies.
+func NewRootCommandWith(streams IO, deps Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "openchef",
 		Short: "Orchestrate AI coding agents across your subscriptions",
@@ -33,6 +52,10 @@ func NewRootCommand(streams IO) *cobra.Command {
 	root.SetErr(streams.Err)
 	root.CompletionOptions.HiddenDefaultCmd = true
 
-	root.AddCommand(newVersionCommand())
+	root.AddCommand(
+		newVersionCommand(),
+		newDoctorCommand(deps),
+		newInitCommand(deps),
+	)
 	return root
 }
