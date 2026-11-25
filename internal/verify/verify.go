@@ -53,7 +53,8 @@ type Result struct {
 	// ExitCode is the command's exit status; -1 if it was stopped by a signal or timeout.
 	ExitCode int
 	TimedOut bool
-	// Output is stdout and stderr interleaved as written, bounded to MaxOutput bytes.
+	// Output is stdout and stderr in arrival order (ordering between the two streams is
+	// approximate: they are separate pipes), bounded to MaxOutput bytes.
 	Output    string
 	Truncated bool
 	Duration  time.Duration

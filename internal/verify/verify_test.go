@@ -36,12 +36,14 @@ func helper(mode string) int {
 		return n
 	case "spam":
 		n, _ := strconv.Atoi(arg)
-		fmt.Fprint(os.Stderr, "BEGIN\n")
+		// Order is only guaranteed within one stream, so the markers share stdout.
+		fmt.Print("BEGIN\n")
 		line := strings.Repeat("x", 99) + "\n"
 		for range n / 100 {
 			fmt.Print(line)
 		}
-		fmt.Fprint(os.Stderr, "END\n")
+		fmt.Print("END\n")
+		fmt.Fprint(os.Stderr, "on stderr\n")
 		return 1
 	case "sleep":
 		time.Sleep(time.Hour)
@@ -116,7 +118,8 @@ func TestOutputKeepsHeadAndTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Truncated || !strings.HasPrefix(res.Output, "BEGIN\n") || !strings.HasSuffix(res.Output, "END\n") ||
+	if !res.Truncated || !strings.HasPrefix(res.Output, "BEGIN\n") || !strings.Contains(res.Output, "END\n") ||
+		!strings.Contains(res.Output, "on stderr\n") ||
 		!strings.Contains(res.Output, "bytes omitted") || len(res.Output) > 1100 {
 		t.Fatalf("truncated output (%d bytes): %q", len(res.Output), res.Output)
 	}
