@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"time"
@@ -36,6 +37,14 @@ type attemptResult struct {
 // runStep works on step i until it is verified (true) or the task is parked (false).
 func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 	s := &r.steps[i]
+	if err := r.requireNoRunningAttempt(ctx, s.Index); err != nil {
+		return false, err
+	}
+	// A step commit is only made after verification passed, so a commit found for a
+	// step that is not verified yet means a crash came between the two: finish it.
+	if done, err := r.adoptCommit(ctx, i); err != nil || done {
+		return done, err
+	}
 	if s.Status == task.StepFailed {
 		if err := r.stepTo(ctx, i, task.StepPending, store.StepChange{}); err != nil {
 			return false, err
@@ -49,6 +58,7 @@ func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 	}
 
 	var exclude []string
+	retries := 0 // feedback turns on this step, across attempts (§7.2: per step)
 	kind, msg := task.TurnPrompt, stepPrompt(&r.t, s, len(r.steps))
 	var earliestReset time.Time // of the pools excluded so far
 	for {
@@ -59,7 +69,7 @@ func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("engine: route step %d: %w", s.Index, err)
 		}
-		res, err := r.attempt(ctx, i, agent, kind, msg)
+		res, err := r.attempt(ctx, i, agent, kind, msg, &retries)
 		if err != nil {
 			return false, err
 		}
@@ -79,6 +89,47 @@ func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 				Message: fmt.Sprintf("%s ran out of quota on pool %s; failing over", res.from, res.pool)})
 		}
 	}
+}
+
+func (r *run) requireNoRunningAttempt(ctx context.Context, step int) error {
+	attempts, err := r.e.cfg.Store.Attempts(ctx, r.t.ID)
+	if err != nil {
+		return fmt.Errorf("engine: %w", err)
+	}
+	for i := range attempts {
+		if attempts[i].StepIndex == step && attempts[i].Status == task.AttemptRunning {
+			return fmt.Errorf("engine: task %s step %d attempt %d: %w", r.t.ID, step, attempts[i].ID, ErrNeedsRecovery)
+		}
+	}
+	return nil
+}
+
+// adoptCommit marks step i verified if the branch already has its commit.
+func (r *run) adoptCommit(ctx context.Context, i int) (bool, error) {
+	s := &r.steps[i]
+	sha, found, err := r.wt.FindStepCommit(ctx, r.t.BaseCommit, string(r.t.ID), s.Index)
+	if err != nil {
+		return false, fmt.Errorf("engine: look for step %d commit: %w", s.Index, err)
+	}
+	if !found {
+		return false, nil
+	}
+	if s.Status != task.StepRunning {
+		if s.Status == task.StepFailed {
+			if err := r.stepTo(ctx, i, task.StepPending, store.StepChange{}); err != nil {
+				return false, err
+			}
+		}
+		if err := r.stepTo(ctx, i, task.StepRunning, store.StepChange{}); err != nil {
+			return false, err
+		}
+	}
+	if err := r.stepTo(ctx, i, task.StepVerified, store.StepChange{VerifiedCommit: sha}); err != nil {
+		return false, err
+	}
+	r.publish(Event{Kind: EventStepFinished, Step: s.Index, Status: string(task.StepVerified),
+		Message: sha + " (found after a restart)"})
+	return true, nil
 }
 
 // noAgent parks the task: waiting_quota when a pool resets at a known time,
@@ -108,7 +159,7 @@ func (r *run) stepTo(ctx context.Context, i int, to task.StepStatus, c store.Ste
 
 // attempt is one agent's work on step i: one session (resumed once after a crash) and
 // as many turns as the retry budget allows.
-func (r *run) attempt(ctx context.Context, i int, agent Agent, kind task.TurnKind, msg string) (attemptResult, error) {
+func (r *run) attempt(ctx context.Context, i int, agent Agent, kind task.TurnKind, msg string, retries *int) (attemptResult, error) {
 	s := &r.steps[i]
 	lim := r.e.cfg.Limits
 	a := task.Attempt{TaskID: r.t.ID, StepIndex: s.Index, Agent: agent.Name, Runtime: agent.Runtime, Model: agent.Model, Pool: agent.Pool}
@@ -131,17 +182,17 @@ func (r *run) attempt(ctx context.Context, i int, agent Agent, kind task.TurnKin
 		}
 	}()
 
-	retries, rateLimits, resumed := 0, 0, false
+	rateLimits, resumed := 0, false
 	retry := func(next string, nextKind task.TurnKind, why string) (bool, error) {
-		if retries >= lim.MaxRetries {
+		if *retries >= lim.MaxRetries {
 			return false, nil
 		}
-		retries++
+		*retries++
 		if err := r.stepTo(ctx, i, task.StepRunning, store.StepChange{CountRetry: true}); err != nil {
 			return false, err
 		}
 		r.publish(Event{Kind: EventNotice, Step: s.Index, Attempt: a.ID,
-			Message: fmt.Sprintf("retry %d of %d: %s", retries, lim.MaxRetries, why)})
+			Message: fmt.Sprintf("retry %d of %d: %s", *retries, lim.MaxRetries, why)})
 		msg, kind = next, nextKind
 		return true, nil
 	}
@@ -264,6 +315,9 @@ func (r *run) verify(ctx context.Context, s *task.Step) (*verify.Result, error) 
 // succeeded. A replay after a crash finds the existing commit by its trailers.
 func (r *run) commit(ctx context.Context, i int, a *task.Attempt, agent Agent) (attemptResult, error) {
 	s := &r.steps[i]
+	if err := r.ensureActive(ctx); err != nil {
+		return attemptResult{}, err
+	}
 	sha, err := r.wt.CommitStep(ctx, r.t.BaseCommit, gitws.StepCommit{
 		Task: string(r.t.ID), Step: s.Index, Agent: agent.Name, Pool: agent.Pool, Subject: s.Title,
 	})
@@ -288,10 +342,21 @@ func (r *run) exhausted(ctx context.Context, i int, a *task.Attempt, ls *liveSes
 	if err := r.closeSession(ctx, ls); err != nil {
 		r.publish(Event{Kind: EventNotice, Step: s.Index, Attempt: a.ID, Message: err.Error()})
 	}
-	rel := path.Join(gitws.ControlDir, "patches", fmt.Sprintf("step-%d-%s.patch", s.Index, agent.Name))
-	saved, err := r.wt.CapturePatch(ctx, filepath.Join(r.wt.Path, filepath.FromSlash(rel)))
+	if err := r.ensureActive(ctx); err != nil {
+		return attemptResult{}, err
+	}
+	// The attempt id keeps patches of several failovers apart and makes a replay of
+	// this attempt (crash after the reset) find the patch it saved before.
+	rel := path.Join(gitws.ControlDir, "patches", fmt.Sprintf("step-%d-%s-%d.patch", s.Index, agent.Name, a.ID))
+	abs := filepath.Join(r.wt.Path, filepath.FromSlash(rel))
+	saved, err := r.wt.CapturePatch(ctx, abs)
 	if err != nil {
 		return attemptResult{}, fmt.Errorf("engine: save partial work of step %d: %w", s.Index, err)
+	}
+	if !saved {
+		if _, statErr := os.Stat(abs); statErr == nil {
+			saved = true
+		}
 	}
 	if err := r.wt.ResetTo(ctx, r.lastVerified(i)); err != nil {
 		return attemptResult{}, fmt.Errorf("engine: reset step %d: %w", s.Index, err)

@@ -42,7 +42,7 @@ type Event struct {
 
 // Sink receives engine events. Publish must not block: the engine calls it from the
 // step loop, and a slow viewer must never slow an agent down. Implementations buffer
-// and drop or fan out as they see fit.
+// and drop or fan out as they see fit. Publish may be called from several goroutines.
 type Sink interface {
 	Publish(Event)
 }

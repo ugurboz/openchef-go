@@ -60,13 +60,17 @@ func (r *run) runTurn(ctx context.Context, ls *liveSession, a *task.Attempt, age
 			return
 		}
 		stopReason, why = reason, w
-		ictx, icancel := context.WithTimeout(context.WithoutCancel(ctx), lim.StopWait)
-		defer icancel()
-		if err := ls.s.Interrupt(ictx); err != nil && !errors.Is(err, runtime.ErrSessionClosed) {
-			r.publish(Event{Kind: EventNotice, Step: a.StepIndex, Attempt: a.ID, Agent: agent.Name,
-				Message: "interrupt failed: " + err.Error()})
-		}
+		// The deadline starts now and the interrupt runs aside: some adapters block in
+		// Interrupt until the turn ends, and the loop must keep draining events.
 		stopBy = time.After(lim.StopWait)
+		go func() {
+			ictx, icancel := context.WithTimeout(context.WithoutCancel(ctx), lim.StopWait)
+			defer icancel()
+			if err := ls.s.Interrupt(ictx); err != nil && !errors.Is(err, runtime.ErrSessionClosed) {
+				r.publish(Event{Kind: EventNotice, Step: a.StepIndex, Attempt: a.ID, Agent: agent.Name,
+					Message: "interrupt failed: " + err.Error()})
+			}
+		}()
 	}
 
 wait:

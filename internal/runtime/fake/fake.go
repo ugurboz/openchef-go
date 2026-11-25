@@ -30,6 +30,9 @@ type Turn struct {
 	Fail *runtime.Failure
 	// Hang blocks the turn until it is interrupted or its context ends.
 	Hang bool
+	// IgnoreInterrupt makes the turn ignore Interrupt (and Close); only its context
+	// ends it, like an agent that does not react to an interrupt request.
+	IgnoreInterrupt bool
 	// Text is the final answer of a completed turn.
 	Text string
 }
@@ -193,6 +196,8 @@ type session struct {
 	closed    bool
 	turning   bool
 	interrupt chan struct{}
+	played    chan struct{} // closed when the current turn's goroutine has finished
+	stubborn  bool          // the current turn ignores interrupts
 }
 
 func (s *session) Ref() runtime.SessionRef { return s.ref }
@@ -210,62 +215,72 @@ func (s *session) Turn(ctx context.Context, in runtime.TurnInput) (<-chan runtim
 	s.turning = true
 	s.interrupt = make(chan struct{})
 	stop := s.interrupt
+	done := make(chan struct{})
+	s.played = done
 	s.mu.Unlock()
 	s.rt.record(Call{Kind: CallTurn, Session: s.ref.ID, Text: in.Text})
 
-	ch := make(chan runtime.Event, 16)
-	go s.play(ctx, stop, ch)
+	// Room for every event plus the terminal one: the fake never blocks on a consumer
+	// that stopped reading, like the real adapters' unbounded queues.
+	t, ok := s.rt.next()
+	s.mu.Lock()
+	s.stubborn = t.IgnoreInterrupt
+	s.mu.Unlock()
+	ch := make(chan runtime.Event, len(t.Events)+1)
+	go s.play(ctx, t, ok, stop, ch, done)
 	return ch, nil
 }
 
-func (s *session) play(ctx context.Context, stop <-chan struct{}, ch chan<- runtime.Event) {
-	defer close(ch)
-	defer func() {
-		s.mu.Lock()
-		s.turning = false
-		s.mu.Unlock()
-	}()
+func (s *session) play(ctx context.Context, t Turn, ok bool, stop <-chan struct{}, ch chan<- runtime.Event, done chan<- struct{}) {
+	defer close(done)
+	end := s.outcome(ctx, t, ok, stop, ch)
+	// Like the real adapters, the session accepts the next turn before the terminal
+	// event is delivered.
+	s.mu.Lock()
+	s.turning = false
+	s.mu.Unlock()
+	ch <- end // sized to never block
+	close(ch)
+}
+
+// outcome plays the scripted turn and returns its terminal event.
+func (s *session) outcome(ctx context.Context, t Turn, ok bool, stop <-chan struct{}, ch chan<- runtime.Event) runtime.Event {
 	start := time.Now()
-	t, ok := s.rt.next()
 	if !ok {
-		ch <- failed(runtime.FailProtocol, "fake: script exhausted")
-		return
+		return failed(runtime.FailProtocol, "fake: script exhausted")
+	}
+	if t.IgnoreInterrupt {
+		stop = nil // a stubborn agent: only the context ends it
 	}
 	for _, ev := range t.Events {
 		if ev.At.IsZero() {
 			ev.At = time.Now()
 		}
-		select {
-		case ch <- ev:
-		case <-stop:
-			ch <- failed(runtime.FailInterrupted, "fake: interrupted")
-			return
-		case <-ctx.Done():
-			ch <- ctxFailure(ctx)
-			return
-		}
+		ch <- ev
 	}
 	if t.Hang {
 		select {
 		case <-stop:
-			ch <- failed(runtime.FailInterrupted, "fake: interrupted")
+			return failed(runtime.FailInterrupted, "fake: interrupted")
 		case <-ctx.Done():
-			ch <- ctxFailure(ctx)
+			return ctxFailure(ctx)
 		}
-		return
+	}
+	select {
+	case <-stop:
+		return failed(runtime.FailInterrupted, "fake: interrupted")
+	default:
 	}
 	if t.Edit != nil {
 		if err := t.Edit(s.dir); err != nil {
-			ch <- failed(runtime.FailCrashed, "fake: edit: "+err.Error())
-			return
+			return failed(runtime.FailCrashed, "fake: edit: "+err.Error())
 		}
 	}
 	if t.Fail != nil {
 		f := *t.Fail
-		ch <- runtime.Event{Kind: runtime.EventTurnFailed, At: time.Now(), Failure: &f}
-		return
+		return runtime.Event{Kind: runtime.EventTurnFailed, At: time.Now(), Failure: &f}
 	}
-	ch <- runtime.Event{Kind: runtime.EventTurnCompleted, At: time.Now(), Result: &runtime.TurnResult{
+	return runtime.Event{Kind: runtime.EventTurnCompleted, At: time.Now(), Result: &runtime.TurnResult{
 		FinalText: t.Text, Duration: time.Since(start),
 	}}
 }
@@ -311,7 +326,13 @@ func (s *session) Close(context.Context) error {
 	}
 	s.closed = true
 	s.stopTurnLocked()
+	played, stubborn := s.played, s.stubborn
 	s.mu.Unlock()
+	// Like a real CLI, nothing of this session touches the workspace after Close. A
+	// stubborn turn (IgnoreInterrupt) ends only with its context; do not wait for it.
+	if played != nil && !stubborn {
+		<-played
+	}
 	s.rt.record(Call{Kind: CallClose, Session: s.ref.ID})
 	s.rt.mu.Lock()
 	delete(s.rt.live, s.ref.ID)

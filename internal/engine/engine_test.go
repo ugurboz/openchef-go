@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ugurboz/openchef/internal/gitws"
 	"github.com/ugurboz/openchef/internal/runtime"
 	"github.com/ugurboz/openchef/internal/runtime/fake"
 	"github.com/ugurboz/openchef/internal/store"
@@ -168,7 +170,7 @@ func TestQuotaFailsOverWithPatch(t *testing.T) {
 		a[1].Status != task.AttemptSucceeded || a[1].Agent != "gpt" {
 		t.Fatalf("attempts %+v", a)
 	}
-	patch := filepath.Join(tk.Worktree, ".openchef", "patches", "step-1-opus.patch")
+	patch := filepath.Join(tk.Worktree, ".openchef", "patches", fmt.Sprintf("step-1-opus-%d.patch", a[0].ID))
 	body, err := os.ReadFile(patch)
 	if err != nil || !strings.Contains(string(body), "half done") {
 		t.Fatalf("patch %q, %v", body, err)
@@ -179,7 +181,7 @@ func TestQuotaFailsOverWithPatch(t *testing.T) {
 	}
 	handoff := h.codex.Turns()
 	if len(handoff) != 1 || !strings.Contains(handoff[0], "taking over this step from another agent (opus)") ||
-		!strings.Contains(handoff[0], ".openchef/patches/step-1-opus.patch") {
+		!strings.Contains(handoff[0], fmt.Sprintf(".openchef/patches/step-1-opus-%d.patch", a[0].ID)) {
 		t.Fatalf("handoff %q", handoff)
 	}
 	if n := h.sink.notices(); !slices.ContainsFunc(n, func(m string) bool { return strings.Contains(m, "failing over") }) {
@@ -538,5 +540,155 @@ func waitFor(t *testing.T, cond func() bool) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A cancel during verification, without the daemon cancelling ctx: the engine's next
+// write conflicts and Run returns quietly without committing.
+func TestCancelDuringVerification(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.claude.Push(fake.Turn{Edit: writeDone})
+	id := h.runTask(h.verify)
+	h.cfg.Sink = SinkFunc(func(ev Event) {
+		h.sink.Publish(ev)
+		if ev.Kind == EventVerifyStarted {
+			if _, err := h.db.TransitionTask(context.Background(), id, task.StatusRunning, task.StatusCancelled, store.TaskChange{}); err != nil {
+				t.Errorf("cancel: %v", err)
+			}
+		}
+	})
+	if err := h.engine().Run(context.Background(), id); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	tk := h.task(id)
+	if tk.Status != task.StatusCancelled {
+		t.Fatalf("status %s", tk.Status)
+	}
+	if n := git(t, tk.Worktree, "rev-list", "--count", tk.BaseCommit+"..HEAD"); n != "0" {
+		t.Errorf("%s commits after cancel", n)
+	}
+	h.noLiveSessions()
+}
+
+// An agent that ignores the interrupt is killed (session closed) and resumed once.
+func TestStubbornAgentIsReplaced(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.cfg.Limits.IdleTimeout = 50 * time.Millisecond
+	h.cfg.Limits.StopWait = 100 * time.Millisecond
+	h.claude.Push(fake.Turn{Hang: true, IgnoreInterrupt: true}, fake.Turn{Edit: writeDone})
+	id := h.runTask(h.verify)
+	if err := h.engine().Run(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if tk := h.task(id); tk.Status != task.StatusDone {
+		t.Fatalf("status %s (%s)", tk.Status, tk.Reason)
+	}
+	calls := h.claude.Calls()
+	if !slices.ContainsFunc(calls, func(c fake.Call) bool { return c.Kind == fake.CallResume }) {
+		t.Fatal("stubborn session was not replaced by a resume")
+	}
+	h.noLiveSessions()
+}
+
+// Until recovery exists, Run refuses a task left mid-turn by a shutdown and does not
+// park it.
+func TestRunAfterShutdownNeedsRecovery(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.claude.Push(fake.Turn{Hang: true})
+	id := h.runTask(h.verify)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		waitFor(t, func() bool { return len(h.claude.Turns()) == 1 })
+		cancel()
+	}()
+	if err := h.engine().Run(ctx, id); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Run = %v", err)
+	}
+	if err := h.engine().Run(context.Background(), id); !errors.Is(err, ErrNeedsRecovery) {
+		t.Fatalf("second Run = %v; want ErrNeedsRecovery", err)
+	}
+	if tk := h.task(id); tk.Status != task.StatusRunning {
+		t.Fatalf("status %s; must stay running for recovery", tk.Status)
+	}
+}
+
+// A crash between the step commit and marking the step verified: the next run adopts
+// the commit instead of redoing (and mis-recording) the step.
+func TestCommittedStepIsAdopted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newHarness(t)
+	h.claude.Push(fake.Turn{Hang: true})
+	id := h.runTask(h.verify)
+	sctx, cancel := context.WithCancel(ctx)
+	go func() {
+		waitFor(t, func() bool { return len(h.claude.Turns()) == 1 })
+		cancel()
+	}()
+	_ = h.engine().Run(sctx, id)
+
+	// Simulate what the crashed daemon had done: committed the step, then died.
+	tk := h.task(id)
+	repo, err := gitws.Open(ctx, h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.CreateWorktree(ctx, tk.Worktree, tk.Branch, tk.BaseCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDone(tk.Worktree); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := wt.CommitStep(ctx, tk.BaseCommit, gitws.StepCommit{Task: string(id), Step: 1, Agent: "opus", Pool: "claude-max"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stand-in for recovery: end the interrupted turn and attempt.
+	a := h.attempts(id)
+	sessions, _ := h.db.TaskSessions(ctx, id, false)
+	turn, err := h.db.InFlightTurn(ctx, sessions[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.EndTurn(ctx, turn.ID, task.TurnInterrupted, "daemon restart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.EndAttempt(ctx, a[0].ID, task.AttemptInterrupted, "daemon restart"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.engine().Run(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if tk := h.task(id); tk.Status != task.StatusDone {
+		t.Fatalf("status %s (%s)", tk.Status, tk.Reason)
+	}
+	if s := h.step(id); s.VerifiedCommit != sha {
+		t.Fatalf("verified %s; want adopted %s", s.VerifiedCommit, sha)
+	}
+	if n := len(h.claude.Turns()); n != 1 {
+		t.Errorf("%d turns; the adopted step needs no agent", n)
+	}
+}
+
+// The retry budget belongs to the step, not to each attempt.
+func TestRetryBudgetSpansFailover(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.claude.Push(fake.Completed("a"), fake.Completed("b"), fake.Failing(runtime.FailQuotaExhausted, "out"))
+	h.codex.Push(fake.Completed("c"))
+	id := h.runTask(h.verify)
+	if err := h.engine().Run(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if tk := h.task(id); tk.Status != task.StatusNeedsAttention {
+		t.Fatalf("status %s", tk.Status)
+	}
+	if n := len(h.codex.Turns()); n != 1 {
+		t.Errorf("codex got %d turns; the step had used its retries", n)
 	}
 }

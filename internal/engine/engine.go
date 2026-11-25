@@ -141,6 +141,11 @@ func sleep(ctx context.Context, d time.Duration) error {
 // unwinds without further writes.
 var ErrNotActive = errors.New("engine: task is not active")
 
+// ErrNeedsRecovery means a step still has an attempt recorded as running, left by a
+// daemon that stopped mid-turn. Run does not touch such a task; recovery (§5.3) resumes
+// its session.
+var ErrNeedsRecovery = errors.New("engine: task has a running attempt to recover")
+
 // stoppedBy reports whether err means the task is no longer the engine's to drive.
 func stoppedBy(err error) bool {
 	if errors.Is(err, ErrNotActive) {
@@ -160,16 +165,21 @@ func (e *Engine) Run(ctx context.Context, id task.ID) error {
 		return err
 	}
 	err = r.drive(ctx)
-	switch {
-	case err == nil, stoppedBy(err):
+	if err == nil || stoppedBy(err) {
 		return nil
+	}
+	// A cancel moves the task out of the active states, which makes the engine's next
+	// write conflict on a turn, attempt or step, and may also cancel ctx. Either way
+	// the task is no longer ours.
+	if t, terr := e.cfg.Store.Task(context.WithoutCancel(ctx), id); terr == nil && !t.Status.Active() {
+		return nil
+	}
+	switch {
 	case ctx.Err() != nil:
-		// A cancel (CLI) moves the task out of the active states and then cancels ctx;
-		// a shutdown only cancels ctx and leaves the task for recovery.
-		if t, terr := e.cfg.Store.Task(context.WithoutCancel(ctx), id); terr == nil && !t.Status.Active() {
-			return nil
-		}
+		// Shutdown: the task stays as it is for recovery.
 		return fmt.Errorf("engine: task %s: %w", id, ctx.Err())
+	case errors.Is(err, ErrNeedsRecovery):
+		return err
 	}
 	// Something unexpected (store, git, verification infrastructure): park the task so
 	// a human sees it, and report the error.
@@ -270,6 +280,19 @@ func (r *run) lastVerified(i int) string {
 		}
 	}
 	return r.t.BaseCommit
+}
+
+// ensureActive re-reads the task right before a side effect the store cannot guard
+// (a git commit or reset) and returns ErrNotActive if it was cancelled meanwhile.
+func (r *run) ensureActive(ctx context.Context) error {
+	t, err := r.e.cfg.Store.Task(ctx, r.t.ID)
+	if err != nil {
+		return fmt.Errorf("engine: %w", err)
+	}
+	if !t.Status.Active() {
+		return fmt.Errorf("engine: task %s is %s: %w", r.t.ID, t.Status, ErrNotActive)
+	}
+	return nil
 }
 
 func (r *run) setStatus(ctx context.Context, to task.Status, reason string, resumeAt time.Time) error {
