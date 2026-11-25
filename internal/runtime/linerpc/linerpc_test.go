@@ -369,3 +369,65 @@ func TestTrafficIsLogged(t *testing.T) {
 		t.Fatalf("log missing traffic:\n%s", out)
 	}
 }
+
+// TestBarrierOrdersNotificationsBeforeResponse: updates that precede a response must all
+// be consumed before Barrier returns, even with a slow consumer (ACP session/prompt).
+func TestBarrierOrdersNotificationsBeforeResponse(t *testing.T) {
+	t.Parallel()
+	p, r := newPair(t, Options{})
+	var mu sync.Mutex
+	seen := 0
+	go func() {
+		for n := range p.Notifications() {
+			if n.Release() {
+				continue
+			}
+			time.Sleep(time.Millisecond) // slow consumer
+			mu.Lock()
+			seen++
+			mu.Unlock()
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- p.Call(ctx5(t), "session/prompt", nil, nil) }()
+	m := r.read()
+	var b strings.Builder
+	for i := range 500 {
+		fmt.Fprintf(&b, `{"method":"session/update","params":{"i":%d}}`+"\n", i)
+	}
+	fmt.Fprintf(&b, `{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}`, m.ID)
+	r.write(b.String())
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Barrier(ctx5(t)); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen != 500 {
+		t.Fatalf("Barrier returned after %d of 500 notifications", seen)
+	}
+}
+
+func TestBarrierAfterClose(t *testing.T) {
+	t.Parallel()
+	p, r := newPair(t, Options{})
+	go func() {
+		for n := range p.Notifications() {
+			n.Release()
+		}
+	}()
+	r.write(`{"method":"x"}`)
+	_ = r.out.Close()
+	<-p.Done()
+	if err := p.Barrier(ctx5(t)); err != nil {
+		t.Fatalf("Barrier after close: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p2, _ := newPair(t, Options{}) // nobody reads: the barrier can only end by ctx
+	if err := p2.Barrier(ctx); err == nil {
+		t.Fatal("cancelled Barrier returned nil")
+	}
+}

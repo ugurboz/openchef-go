@@ -240,3 +240,23 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   to return `cancelled` (kill and reload after 10 s, as for Claude). Usage is the
   prompt result's per-turn `usage`; cached reads are reported separately.
 - **Consequences:** replay tests on `m18-load-resumed`, `m18-cancel`, `m18-bypass`.
+
+## D-017 — agy: structured output by prompt, validation and one repair; response barrier
+*2026-11-25 · M2.4*
+
+- **Context:** agy has no native output schema (m1-findings §4), and ACP ends a turn with
+  the `session/prompt` response, which the JSON-RPC peer delivers on a different path
+  than the `session/update` notifications that precede it.
+- **Decision:** the adapter appends the schema to the prompt, extracts the JSON value
+  from the final answer (whole text, last fenced block, or outermost object/array) and
+  validates it with `internal/schema` (`santhosh-tekuri/jsonschema/v6`, pure Go,
+  Apache-2.0; external `$ref`s refused). One repair prompt follows a failure; a second
+  failure ends the turn as `protocol`. Usage counts both prompts. The final answer is
+  the agent text after the last tool call. `linerpc.Peer.Barrier` makes the adapter wait
+  until every update read before the response was routed, so no chunk is lost or
+  credited to the next turn.
+- **Challenge (self-review):** a new dependency for one runtime. It is small, has no
+  transitive network or cgo use, and the engine can reuse it to double-check native
+  schema output.
+- **Consequences:** tests `TestStructuredOutput`, `TestBarrierKeepsEveryChunk`,
+  `TestBarrierOrdersNotificationsBeforeResponse`.
