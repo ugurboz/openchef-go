@@ -798,7 +798,8 @@ cmd/openchef/            main package (CLI, TUI entry, daemon entry)
 internal/
   api/                   JSON-RPC types and server/client
   daemon/                lifecycle, single-instance lock, recovery
-  engine/                task/step state machines, retries, failover
+  task/                  domain model: tasks, steps, attempts, sessions, turns, state machines
+  engine/                step execution, retries, failover (drives package task)
   router/                agent selection
   quota/                 sources (L1/L2/L3), normalization, health, admission
   permissions/           rule parser, shell parser integration, evaluator, approval queue

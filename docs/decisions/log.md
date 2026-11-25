@@ -260,3 +260,36 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   schema output.
 - **Consequences:** tests `TestStructuredOutput`, `TestBarrierKeepsEveryChunk`,
   `TestBarrierOrdersNotificationsBeforeResponse`.
+
+## D-018 — Domain model in `internal/task`; store transitions are compare-and-set
+*2026-11-25 · M3.3*
+
+- **Context:** the engine (M3.5), recovery (M3.7) and the CLI all need the task, step,
+  attempt, session and turn types and the §7.1 state machine; the store must enforce the
+  write-ahead rule (§11) when the daemon, a CLI command (`cancel`, `retry`) and recovery
+  race for the same row.
+- **Options:** (a) state machine inside `internal/engine`, store writes whatever it is
+  given; (b) a dependency-free domain package that the store and engine both import, and
+  every store transition guarded by the caller's expected state.
+- **Challenge (self-review):** (b) adds a package not in §16 and makes the store
+  validate rules the engine already knows. But with (a) the store would import the
+  engine (cycle) or accept any status string, and a lost update between `cancel` and the
+  engine loop is exactly the stale-state bug class the prototype had. Validating twice
+  is cheap; the CHECK constraints are a third line against manual edits.
+- **Decision:** (b). `task` holds the types, IDs (10-char Crockford base32, 50 random
+  bits) and state machines. Every store transition is `UPDATE … WHERE status = from`;
+  zero rows yields `ErrNotFound` or a `*ConflictError` with the actual state. Steps,
+  attempts and sessions only change while their parent is in the right state; partial
+  unique indexes allow one running attempt per step and one turn in flight per session.
+  Process start tokens are stored as decimal text (uint64 does not fit SQLite INTEGER).
+- **Review (independent agent):** found that `cancel` did not stop later side effects
+  and that a resumed session could not be recorded. Fixed: attempts, sessions and turns
+  start only while the task is active (running/reviewing); leaving the active states
+  ends running attempts, interrupts turns in flight and resets running steps in the same
+  transaction; `done` needs every step verified. A session row is one conversation: a
+  process replaced within it updates the row (`SetSessionProcess`), a resume after a
+  daemon restart is a new row with `resumed_from`, and the native id is unique among
+  live rows only.
+- **Consequences:** §16 lists `internal/task`. Tests `TestTransitionTaskConcurrent`
+  (16 writers, one winner), `TestCancelRacesEngine`, `TestResumeAfterRestart`,
+  `TestDoneRequiresFinishedWork`, `TestNativeIDUnique`.
