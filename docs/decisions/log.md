@@ -186,3 +186,40 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** tests `TestStructuredOutputRespawnsAndBack`,
   `TestCrashOnFirstTurnRecoversWithFallback`; `TestLive` covers the schema-first path
   against the real CLI. Start failures carry the CLI's stderr tail.
+
+## D-015 — agy: sandbox always on, `proceed-in-sandbox`, ACP mode always `default`
+*2026-11-25 · M2.4 · evidence: m1-findings §11*
+
+- **Context:** agy ignores `permissions.deny` entirely, and its `auto`/`accept-edits`
+  modes act without consulting the host, so OpenChef rules would silently stop
+  applying. The terminal sandbox, measured, allows only reads inside the workspace: no
+  writes, no network, no reads outside.
+- **Options:** (a) sandbox on, `proceed-in-sandbox`; (b) sandbox off, `request-review`
+  (every command asks once); (c) use agy's own modes for OpenChef's modes.
+- **Challenge (self-review):** (a) lets commands run unasked, so deny rules do not see
+  them; and builds need writes, so every one escapes and costs a round-trip.
+- **Decision:** (a). Unasked commands are contained to reading the workspace, which
+  every mode allows anyway; anything that writes, reaches the network or leaves the
+  workspace must escape with `BypassSandbox` and therefore reaches the approver, which
+  applies the mode, deny rules and invariants. (b) would run approved commands with
+  full user rights, weaker than Codex's `workspace-write`. (c) is ruled out by `auto`
+  and `accept-edits` bypassing the host. OpenChef's modes are therefore implemented by
+  the approver (as for Codex, D-003): agy always runs in ACP mode `default`; `plan`
+  denies every request; `acceptEdits` auto-allows edits subject to invariants.
+- **Consequences:** settings are written by OpenChef to its own `--cli_dir_name`
+  directory (the user's agy configuration is never read). A repository under the temp
+  tree loses containment (the sandbox allows `$TMPDIR`): the adapter refuses to start
+  there. Approval requests carry `BypassSandbox` so the approver and the UI can show
+  that a command leaves the sandbox. agy's `plan` mode is never used (it writes outside
+  the workspace).
+
+## D-016 — agy protocol rules: options by kind, swallow load replay, cancel by notification
+*2026-11-25 · M2.4*
+
+- **Decision:** permission answers select the option whose `kind` is `allow_once` /
+  `reject_once` (ids changed between versions); if none matches, the request is
+  cancelled. Updates received while `session/load` runs are history and are dropped
+  (the D-005 failure mode). `Interrupt` sends `session/cancel` and waits for the prompt
+  to return `cancelled` (kill and reload after 10 s, as for Claude). Usage is the
+  prompt result's per-turn `usage`; cached reads are reported separately.
+- **Consequences:** replay tests on `m18-load-resumed`, `m18-cancel`, `m18-bypass`.

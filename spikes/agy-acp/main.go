@@ -14,6 +14,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ugurboz/openchef/spikes/internal/mcpserver"
 	"github.com/ugurboz/openchef/spikes/internal/rpc"
 )
 
@@ -39,10 +40,31 @@ type findings struct {
 func main() {
 	out := flag.String("out", "", "output directory")
 	model := flag.String("model", "gemini-3.8-flash-low", "cheapest model")
+	only := flag.String("only", "", "m18: run spike M1.8 (M18_ONLY narrows it to named runs)")
+	mcp := flag.Bool("mcp-server", false, "internal: run as MCP server")
+	mcpLog := flag.String("mcp-log", "", "internal: MCP call log")
 	flag.Parse()
+	if *mcp {
+		if err := mcpserver.Serve(*mcpLog); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *out == "" {
 		fmt.Fprintln(os.Stderr, "-out is required")
 		os.Exit(2)
+	}
+	if *only == "m18" {
+		m := *model
+		if m == "gemini-3.8-flash-low" {
+			m = "gemini-3.8-flash" // M1.8 sets effort separately (thought_level)
+		}
+		if err := runM18(*out, m); err != nil {
+			fmt.Fprintln(os.Stderr, "spike failed:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := run(*out, *model); err != nil {
 		fmt.Fprintln(os.Stderr, "spike failed:", err)
