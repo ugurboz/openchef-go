@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
@@ -33,6 +34,8 @@ type DB struct {
 	path   string
 	writer *sql.DB
 	reader *sql.DB
+	// now stamps created_at/updated_at and similar columns; tests replace it.
+	now func() time.Time
 }
 
 // Open opens (creating if necessary) the database at path and applies all pending
@@ -75,7 +78,7 @@ func open(ctx context.Context, path string, migrations fs.FS) (*DB, error) {
 	if err := reader.PingContext(ctx); err != nil {
 		return nil, errors.Join(fmt.Errorf("store: open reader: %w", err), closePool(reader), closePool(writer))
 	}
-	return &DB{path: abs, writer: writer, reader: reader}, nil
+	return &DB{path: abs, writer: writer, reader: reader, now: time.Now}, nil
 }
 
 // Path returns the absolute path of the database file.
