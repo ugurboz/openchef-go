@@ -126,3 +126,42 @@ the kernel's verification command, never by the agent's reply.
 - Windows behaviour of all three CLIs (§17.4).
 - Live quota-exhaustion values: Codex `usageLimitExceeded`, Claude `rate_limit_event`
   rejection, agy error shape.
+
+---
+
+## 9. Follow-up spike M1.6 — Claude hardening (after design review D-006)
+
+Run on 2026-11-25 with `claude` 2.1.325 (`spikes/claude-cli/m16.go`, recordings
+`testdata/claude/m16-*.jsonl`). Triggered by an independent design review of the
+Claude adapter.
+
+| Check | Result |
+|---|---|
+| `--restricted` + Write tool to `../outside.txt` | blocked by Claude **without** asking the host |
+| `--restricted` + Write `.claude/settings.local.json` | reached `can_use_tool` even in `acceptEdits` |
+| `--restricted` + Bash `echo b > ../outside2.txt` | reached `can_use_tool` even in `acceptEdits` |
+| `--restricted` + `--permission-mode bypassPermissions` | refused at start: `Error: bypassPermissions not supported in restricted mode` (exit 1) |
+| `--tools "Bash,Read,Edit,Write,Glob,Grep"` | limits the built-in tool set |
+| Interrupt (`control_request` `{"subtype":"interrupt"}`) | `control_response` success `{"still_queued":[]}`, then `result` `subtype: error_during_execution`, `terminal_reason: aborted_streaming` |
+| Next turn after interrupt | normal `result` with `result_index: 1` |
+| One `result` per user message | yes; `result_index` increments per turn |
+| `--max-budget-usd` exceeded | `result` `subtype: error_max_budget_usd`, `is_error: true`, `terminal_reason: budget_exhausted` |
+| `--permission-mode plan` with `--model haiku` | ran on `claude-sonnet-5-5` (again); ~25× the cost of the same prompt in other modes |
+
+Without `--restricted`, the review also found (from the M1 recordings): the session
+loads the repository's `.claude/settings.local.json` (hooks, allow rules, env), the
+init message reports `other_hook_ask_outranks_host: true`, and the default tool set
+includes tools that act outside the turn (`CronCreate`, `RemoteTrigger`,
+`ScheduleWakeup`, `SendToProject`, `PushNotification`, `Monitor`, `Task`).
+
+## 10. Follow-up spike M1.7 — `--restricted` in combination (review round 2)
+
+Recordings `testdata/claude/m17-*.jsonl`.
+
+| Check | Result |
+|---|---|
+| Planner shape: `--restricted --permission-mode dontAsk --tools Read,Glob,Grep --json-schema … --mcp-config …` with `permissions.allow: ["mcp__openchef__ask_user"]` | works: `StructuredOutput` stays available (schema-valid `structured_output`), `ask_user` was called and its answer used, model stayed `claude-haiku-5-5` (no plan-mode model switch) |
+| `--restricted --permission-mode auto` | accepted; two turns completed |
+| Deny rule `Write(**/.claude/**)` against `sub/.claude/settings.json` | denied (`permission_denials: [Write]`), the sibling write succeeded |
+| `--resume` in a new process | context kept; `result_index` **restarts at 0** in the new process |
+| Tools exposed by an MCP server | every tool of the server is offered to the model (`mcp__openchef__approve` appeared next to `ask_user`), so OpenChef's server must expose only `ask_user` |
