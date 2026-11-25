@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -11,10 +12,23 @@ import (
 	"github.com/ugurboz/openchef/internal/runtime"
 )
 
-const (
-	ws   = "/work/repo"
-	home = "/home/u"
+// root is the filesystem root as tests spell it: "" on Unix, "C:" on Windows.
+var root = func() string {
+	if goruntime.GOOS == "windows" {
+		return "C:"
+	}
+	return ""
+}()
+
+var (
+	ws   = root + "/work/repo"
+	home = root + "/home/u"
 )
+
+// absRule spells an absolute-path rule (//path) for this platform.
+func absRule(tool, p string) string {
+	return tool + "(//" + strings.TrimPrefix(root+p, "/") + ")"
+}
 
 func rules(t *testing.T, raws ...string) []Rule {
 	t.Helper()
@@ -188,7 +202,7 @@ func TestBashWildcardAndPrefix(t *testing.T) {
 func TestFileRules(t *testing.T) {
 	t.Parallel()
 	e := evaluator(t, Policy{Mode: runtime.ModeAcceptEdits,
-		Allow: rules(t, "Read(//etc/os-release)"),
+		Allow: rules(t, absRule("Read", "/etc/os-release")),
 		Ask:   rules(t, "Edit(/migrations/**)"),
 		Deny:  rules(t, "Read(./.env)", "Read(*.pem)", "Read(~/.ssh/**)", "Edit(docs/legal/**)")})
 	cases := []struct {
@@ -199,13 +213,13 @@ func TestFileRules(t *testing.T) {
 		{"Grep", ws + "/.env", Deny},
 		{"Read", ws + "/certs/deep/key.pem", Deny},
 		{"Read", home + "/.ssh/id_ed25519", Deny},
-		{"Read", "/etc/os-release", Allow},
-		{"Read", "/etc/shadow", Ask},
+		{"Read", root + "/etc/os-release", Allow},
+		{"Read", root + "/etc/shadow", Ask},
 		{"Read", home + "/.openchef/state.db", Deny},
 		{"Edit", ws + "/main.go", Allow},
 		{"Write", ws + "/migrations/0003.sql", Ask},
 		{"MultiEdit", ws + "/docs/legal/terms.md", Deny},
-		{"Write", "/tmp/x", Deny},
+		{"Write", root + "/tmp/x", Deny},
 		{"Edit", ws + "/../other/x", Deny},
 		{"Write", ws + "/.git/config", Deny},
 		{"Edit", ws + "/sub/.claude/settings.json", Deny},
@@ -244,7 +258,7 @@ func TestModes(t *testing.T) {
 			}
 		}
 		// Invariants hold in every mode, bypass included.
-		if v := e.Evaluate(Request{Tool: "Write", Paths: []string{"/etc/passwd"}}); v.Decision != Deny {
+		if v := e.Evaluate(Request{Tool: "Write", Paths: []string{root + "/etc/passwd"}}); v.Decision != Deny {
 			t.Errorf("%s: write outside workspace = %s", mode, v.Decision)
 		}
 		if v := e.Evaluate(bash("git push")); v.Decision != Deny {

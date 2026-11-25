@@ -160,6 +160,9 @@ func (r *Rule) matchPath(p, workspace, home string) bool {
 	switch {
 	case strings.HasPrefix(pat, "//"):
 		pat = pat[1:]
+		if len(pat) >= 3 && pat[2] == ':' {
+			pat = pat[1:] // //C:/x on Windows
+		}
 	case strings.HasPrefix(pat, "~/"):
 		pat = filepath.ToSlash(home) + pat[1:]
 	case strings.HasPrefix(pat, "/"):

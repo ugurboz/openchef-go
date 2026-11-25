@@ -3,6 +3,7 @@ package permissions
 import (
 	"fmt"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 
 	"github.com/ugurboz/openchef/internal/runtime"
@@ -219,6 +220,11 @@ func maxVerdict(a, b Verdict) Verdict {
 func (e *Evaluator) abs(p string) string {
 	if strings.HasPrefix(p, "~/") {
 		return filepath.Join(e.home, p[2:])
+	}
+	if goruntime.GOOS == "windows" && (strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)) {
+		// Rooted but without a drive (/etc/x in Git Bash, \x in cmd): never inside the
+		// workspace. Resolve it on the workspace's volume so it is treated as outside.
+		return filepath.Join(filepath.VolumeName(e.workspace)+`\`, p)
 	}
 	if !filepath.IsAbs(p) {
 		return filepath.Join(e.workspace, p)
