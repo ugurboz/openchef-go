@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
@@ -10,6 +11,14 @@ import (
 	"github.com/ugurboz/openchef/internal/config"
 	"github.com/ugurboz/openchef/internal/doctor"
 )
+
+// ExitError ends the program with Code without printing anything more: the command has
+// already told the user what happened.
+type ExitError struct {
+	Code int
+}
+
+func (e *ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code) }
 
 // IO holds the streams commands write to. Tests pass buffers; main passes os.Stdout/Stderr.
 type IO struct {
@@ -56,6 +65,7 @@ func NewRootCommandWith(streams IO, deps Deps) *cobra.Command {
 		newVersionCommand(),
 		newDoctorCommand(deps),
 		newInitCommand(deps),
+		newDaemonCommand(deps),
 	)
 	return root
 }
