@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -20,6 +21,9 @@ func run() int {
 
 	cmd := cli.NewRootCommand(cli.IO{Out: os.Stdout, Err: os.Stderr})
 	if err := cmd.ExecuteContext(ctx); err != nil {
+		if exit, ok := errors.AsType[*cli.ExitError](err); ok {
+			return exit.Code
+		}
 		fmt.Fprintf(os.Stderr, "openchef: %v\n", err)
 		return 1
 	}
