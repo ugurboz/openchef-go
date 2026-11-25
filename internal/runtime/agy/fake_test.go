@@ -31,9 +31,7 @@ func TestMain(m *testing.M) {
 	if scenario := os.Getenv(fakeEnv); scenario != "" {
 		os.Exit(runFake(scenario))
 	}
-	// Long enough that a loaded CI machine (stress: 50 runs in parallel) still sees the
-	// fake's "cancelled" reply in time; only the stubborn tests wait it out.
-	interruptWait = 5 * time.Second
+	interruptWait = 1500 * time.Millisecond
 	closeWait = time.Second
 	os.Exit(m.Run())
 }
@@ -88,10 +86,15 @@ func runFake(scenario string) int {
 				ch <- m.Result
 			}
 		case m.Method == "session/cancel":
+			// The channel stays in place once closed: the prompt goroutine may reach
+			// waitCancel only after the cancel arrived (it did under stress load).
 			f.mu.Lock()
 			if f.cancel != nil {
-				close(f.cancel)
-				f.cancel = nil
+				select {
+				case <-f.cancel:
+				default:
+					close(f.cancel)
+				}
 			}
 			f.mu.Unlock()
 		case len(m.ID) > 0:
