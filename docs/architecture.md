@@ -683,7 +683,7 @@ Familiar verbs, consistent nouns. Every command supports `--json` for scripting.
 openchef                          # open the TUI (like `claude`, `codex`)
 openchef "add rate limiting"      # TUI with this request prefilled as a pipeline
 openchef pipeline "<request>"     # plan → approve → implement → verify → review
-openchef run "<prompt>" --verify "go test ./..."   # single step, no plan
+openchef run "<prompt>" --verify "go test ./..."   # single step, no plan; streams live
 openchef status [task]            # tasks and their steps
 openchef logs <task|session> -f   # follow normalized events
 openchef approve|deny <id> / openchef answer <id> "<text>"
@@ -699,6 +699,15 @@ openchef init                     # detect installed CLIs, create ~/.openchef/co
 openchef doctor                   # versions, auth, protocol checks, probe health
 openchef daemon start|stop|status
 ```
+
+**Live by default (D-014).** `run` and `pipeline` without the TUI stay attached to the
+task and stream its normalized events to the terminal as they happen: streamed text,
+each tool call on one line (`● Bash  go test ./...`) with a short result summary,
+approval requests, quota warnings, step and verification outcomes. `-q/--quiet` prints
+only the final summary, `--detach` returns immediately (follow later with
+`openchef logs <task> -f`), `--json` emits one event per line. Ctrl-C detaches the view;
+it does not cancel the task (`openchef cancel` does). The renderer is the same one
+`logs -f` uses, so both always show the same thing.
 
 ### 12.2 TUI (v1, second milestone)
 
@@ -870,7 +879,7 @@ Each milestone is one or more pull requests; each PR is reviewable on its own an
 | **M0 Foundation** | Go module, CI matrix, lint/test/release skeleton, `procs`, `store` + migrations, `config` + `init`/`doctor` skeleton | CI green on 3 OSes; `openchef doctor` detects installed CLIs |
 | **M1 Spikes** | §17 spikes, recorded transcripts | Findings merged; §6.3/§9.3 finalized |
 | **M2 Runtimes** | `Runtime`/`Session` contract, `fake`, Claude, Codex, agy adapters, replay tests | One turn + resume works live on each runtime |
-| **M3 Engine** | `run` end to end: worktree, turns, verify, retries, commit, failover, waiting_quota, recovery | Kill-the-daemon test passes; no leaked processes |
+| **M3 Engine** | `run` end to end: worktree, turns, verify, retries, commit, failover, waiting_quota, recovery; live event stream for `run`, `logs -f`, `status` (D-014) | Kill-the-daemon test passes; no leaked processes; a running task is visible live from the first turn |
 | **M4 Permissions, quota & selection** | Evaluator, shell parsing, approval queue, MCP server for Claude, L1/L2/L3, health, admission; tiers, effort mapping, `auto`/`weighted`/`ordered` strategies (§7.4) | Known bypass cases rejected; routing follows quota; weighted shares hold within ±1 step |
 | **M5 Pipeline** | Plan (structured, per-step importance), approval with edits, implement, review (by importance); `isolated` and `team` modes; merge queue; `merge` | Pipeline completes a multi-step task in both modes; importance and effort profile change agent, effort and review as specified |
 | **M6 TUI** | Bubble Tea client | Feature parity with CLI for daily use |

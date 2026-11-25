@@ -187,6 +187,23 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   `TestCrashOnFirstTurnRecoversWithFallback`; `TestLive` covers the schema-first path
   against the real CLI. Start failures carry the CLI's stderr tail.
 
+## D-014 — `run` streams what the agents do, live, from M3
+*2026-11-25 · plan · requested by the user*
+
+- **Context:** the TUI (M6) is the main place to watch agents, but M3–M5 would otherwise
+  run tasks that are visible only through `status` and log files. Watching what an agent
+  does is a core need, not a polish item.
+- **Options:** (a) wait for the TUI; (b) a separate `watch` command; (c) `run` and
+  `pipeline` stream the task's events by default, like `claude` and `codex` do.
+- **Challenge (self-review):** streaming in the foreground could tie the task's lifetime
+  to the terminal. It does not: the daemon owns the task; the terminal only renders, and
+  Ctrl-C detaches the view instead of cancelling.
+- **Decision:** (c), with `-q/--quiet`, `--detach` and `--json`. `logs -f` and `run` share
+  one renderer over the normalized events (§6.1), so the TUI later reuses the same event
+  model.
+- **Consequences:** M3 exit criteria include seeing a running task live from its first
+  turn.
+
 ## D-015 — agy: sandbox always on, `proceed-in-sandbox`, ACP mode always `default`
 *2026-11-25 · M2.4 · evidence: m1-findings §11*
 
