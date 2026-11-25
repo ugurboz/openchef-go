@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"os"
 	"syscall"
 
 	"github.com/ugurboz/openchef/internal/runtime/linerpc"
@@ -24,6 +25,11 @@ type Client struct {
 
 // Dial connects to the daemon's socket and performs the version handshake.
 func Dial(ctx context.Context, socket, client string) (*Client, error) {
+	// Checked first because a missing socket file surfaces as different errors per OS
+	// (ENOENT, or WSAENETDOWN on Windows).
+	if _, err := os.Stat(socket); errors.Is(err, fs.ErrNotExist) {
+		return nil, ErrNotRunning
+	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", socket)
 	if err != nil {
