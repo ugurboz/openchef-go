@@ -323,7 +323,10 @@ func (s *session) interrupt(ctx context.Context, ts *turnState, wait time.Durati
 	s.endTurn(ts, runtime.Event{Kind: runtime.EventTurnFailed, Failure: &runtime.Failure{
 		Kind: s.stopKind(ts), Message: "turn did not stop after interrupt; process killed",
 	}})
-	if err != nil && !errors.Is(err, runtime.ErrSessionClosed) {
+	// A control request that timed out is what the kill above remedies; only other
+	// failures (the pipe broke) are worth reporting.
+	if err != nil && !errors.Is(err, runtime.ErrSessionClosed) &&
+		!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("claude: interrupt: %w", err)
 	}
 	return nil
