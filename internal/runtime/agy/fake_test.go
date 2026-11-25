@@ -31,7 +31,9 @@ func TestMain(m *testing.M) {
 	if scenario := os.Getenv(fakeEnv); scenario != "" {
 		os.Exit(runFake(scenario))
 	}
-	interruptWait = 1500 * time.Millisecond
+	// Long enough that a loaded CI machine (stress: 50 runs in parallel) still sees the
+	// fake's "cancelled" reply in time; only the stubborn tests wait it out.
+	interruptWait = 5 * time.Second
 	closeWait = time.Second
 	os.Exit(m.Run())
 }
