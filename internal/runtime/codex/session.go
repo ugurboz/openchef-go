@@ -76,9 +76,9 @@ func newTurnState(wantSchema bool) *turnState {
 	return &turnState{q: q, ch: q.C(), started: time.Now(), wantSchema: wantSchema}
 }
 
-func (ts *turnState) emit(ev runtime.Event)        { ts.q.Emit(ev) }
-func (ts *turnState) finish(ev runtime.Event) bool { return ts.q.Finish(ev) }
-func (ts *turnState) isDone() bool                 { return ts.q.Done() }
+func (ts *turnState) emit(ev runtime.Event)   { ts.q.Emit(ev) }
+func (ts *turnState) finish(ev runtime.Event) { ts.q.Finish(ev) }
+func (ts *turnState) isDone() bool            { return ts.q.Done() }
 
 func (ts *turnState) usage() runtime.Usage {
 	ts.mu.Lock()
@@ -230,10 +230,11 @@ func (s *session) clearTurn(ts *turnState) {
 	s.mu.Unlock()
 }
 
+// endTurn clears the turn before queuing its terminal event: a consumer that starts the
+// next turn as soon as the channel closes must not get ErrTurnInProgress.
 func (s *session) endTurn(ts *turnState, ev runtime.Event) {
-	if ts.finish(ev) {
-		s.clearTurn(ts)
-	}
+	s.clearTurn(ts)
+	ts.finish(ev)
 }
 
 func (s *session) onProtocolError(line []byte, err error) {

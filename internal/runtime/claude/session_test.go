@@ -726,3 +726,17 @@ func TestOpenValidation(t *testing.T) {
 		t.Error("defaults")
 	}
 }
+
+// Regression: the channel closing must mean the session accepts the next turn.
+func TestBackToBackTurns(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, "1")
+	s := h.open()
+	for i := range 30 {
+		ch, err := s.Turn(context.Background(), runtime.TurnInput{Text: "ok"})
+		if err != nil {
+			t.Fatalf("turn %d: %v", i, err)
+		}
+		drain(t, ch)
+	}
+}

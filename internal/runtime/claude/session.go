@@ -410,15 +410,17 @@ func (s *session) cleanup() {
 	}
 }
 
+// endTurn clears the turn before queuing its terminal event: a consumer that starts the
+// next turn as soon as the channel closes must not get ErrTurnInProgress.
 func (s *session) endTurn(ts *turnState, ev runtime.Event) {
-	if !ts.q.Finish(ev) {
-		return
-	}
 	s.mu.Lock()
 	if s.turn == ts {
 		s.turn = nil
 	}
 	s.mu.Unlock()
+	if !ts.q.Finish(ev) {
+		return
+	}
 	close(ts.finished)
 }
 

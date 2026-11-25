@@ -292,6 +292,9 @@ Rules every adapter must follow:
   in the sandbox unasked only while they read the workspace (no writes, network or
   outside reads); anything else escapes with `BypassSandbox` and reaches
   `session/request_permission`, answered by option `kind`. File edits always ask.
+- **Structured output (D-017):** schema appended to the prompt, the answer extracted and
+  validated, one repair prompt; the final answer is the text after the last tool call.
+  Turn end is the `session/prompt` response, after a barrier on preceding updates.
 - **Quota:** no L1 or L2 source. L3 estimation only (§10).
 
 ---

@@ -509,3 +509,17 @@ func TestImmediateFailureBeforeTurnStarted(t *testing.T) {
 		}
 	}
 }
+
+// Regression: the channel closing must mean the session accepts the next turn.
+func TestBackToBackTurns(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, "ok")
+	s := h.open()
+	for i := range 30 {
+		ch, err := s.Turn(context.Background(), runtime.TurnInput{Text: "x"})
+		if err != nil {
+			t.Fatalf("turn %d: %v", i, err)
+		}
+		drain(t, ch)
+	}
+}

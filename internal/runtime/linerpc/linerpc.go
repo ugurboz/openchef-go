@@ -50,6 +50,19 @@ const (
 type Notification struct {
 	Method string
 	Params json.RawMessage
+
+	fence chan struct{} // set on the marker queued by Barrier
+}
+
+// Release reports whether n is a Barrier marker rather than a notification, and if so
+// releases the waiting Barrier. Consumers of a peer that uses Barrier must call it for
+// every notification and skip markers; it is false for every real notification.
+func (n Notification) Release() bool {
+	if n.fence == nil {
+		return false
+	}
+	close(n.fence)
+	return true
 }
 
 // Handler answers a request initiated by the remote side. A returned *Error is sent as
@@ -89,11 +102,14 @@ type Peer struct {
 
 	notifyIn  chan Notification
 	notifyOut chan Notification
+	inMu      sync.Mutex // orders Barrier against finish closing notifyIn
+	inClosed  bool
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	err    error // set before done is closed
+	ctx      context.Context
+	cancel   context.CancelFunc
+	done     chan struct{}
+	pumpDone chan struct{} // closed after the last notification was delivered
+	err      error         // set before done is closed
 }
 
 // New starts reading r and writes to w. The peer runs until r ends.
@@ -111,6 +127,7 @@ func New(r io.Reader, w io.Writer, opts Options) *Peer {
 		ctx:       ctx,
 		cancel:    cancel,
 		done:      make(chan struct{}),
+		pumpDone:  make(chan struct{}),
 	}
 	go p.pumpNotifications()
 	go p.readLoop(r)
@@ -355,7 +372,42 @@ func (p *Peer) finish(err error) {
 		delete(p.pending, id)
 	}
 	p.pmu.Unlock()
+	p.inMu.Lock()
+	p.inClosed = true
 	close(p.notifyIn)
+	p.inMu.Unlock()
+}
+
+// Barrier returns once the consumer has taken every notification that was read before
+// the call, plus the marker it queues (see Notification.Release). Protocols that end a
+// turn with a response rather than a notification (ACP's session/prompt) use it so no
+// update that preceded the response is lost or credited to the next turn.
+func (p *Peer) Barrier(ctx context.Context) error {
+	fence := make(chan struct{})
+	p.inMu.Lock()
+	if p.inClosed {
+		p.inMu.Unlock()
+		return p.drained(ctx)
+	}
+	p.notifyIn <- Notification{fence: fence} // the pump always receives while running
+	p.inMu.Unlock()
+	select {
+	case <-fence:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("linerpc: barrier: %w", ctx.Err())
+	}
+}
+
+// drained waits until every queued notification has been delivered after the input
+// ended; there is nothing left that could precede a later response.
+func (p *Peer) drained(ctx context.Context) error {
+	select {
+	case <-p.pumpDone:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("linerpc: barrier: %w", ctx.Err())
+	}
 }
 
 // pumpNotifications decouples the reader from a slow consumer with an unbounded queue,
@@ -364,6 +416,7 @@ func (p *Peer) finish(err error) {
 //
 // The consumer must drain Notifications until it is closed.
 func (p *Peer) pumpNotifications() {
+	defer close(p.pumpDone)
 	defer close(p.notifyOut)
 	var queue []Notification
 	in := p.notifyIn
