@@ -42,8 +42,18 @@ type Options struct {
 	// OnStop runs once on shutdown, before connections are closed, with StopTimeout to
 	// stop sessions gracefully (§5.4).
 	OnStop func(ctx context.Context) error
+	// Init, if set, runs once the lock is held and before the socket accepts clients,
+	// so recovery (§5.3) never runs in two daemons at once. Its Services are added to
+	// Methods and OnStop.
+	Init func(ctx context.Context) (Services, error)
 	// Log receives operational messages; nil discards them.
 	Log *slog.Logger
+}
+
+// Services are what Init contributes.
+type Services struct {
+	Methods map[string]Method
+	OnStop  func(ctx context.Context) error
 }
 
 // Conn is one client connection.
@@ -58,6 +68,12 @@ type Conn struct {
 	mu          sync.Mutex
 	initialized bool
 }
+
+// Done is closed when the client disconnects.
+func (c *Conn) Done() <-chan struct{} { return c.peer.Done() }
+
+// ID identifies the connection within this daemon.
+func (c *Conn) ID() int { return c.id }
 
 // Notify sends a server notification (e.g. event/appended) to this client.
 func (c *Conn) Notify(method string, params any) error {
@@ -104,6 +120,14 @@ func Run(ctx context.Context, opts Options) error {
 			log.Error("release lock", "err", err)
 		}
 	}()
+
+	if opts.Init != nil {
+		svcs, err := opts.Init(ctx)
+		if err != nil {
+			return fmt.Errorf("daemon: start: %w", err)
+		}
+		opts = withServices(opts, svcs)
+	}
 
 	// Holding the lock, any socket file left behind belongs to a dead daemon.
 	if err := os.Remove(p.Socket); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -251,4 +275,26 @@ func (s *server) shutdown(ctx context.Context, ln net.Listener) error {
 	}
 	s.log.Info("daemon stopped")
 	return errors.Join(errs...)
+}
+
+func withServices(opts Options, svcs Services) Options {
+	methods := make(map[string]Method, len(opts.Methods)+len(svcs.Methods))
+	for k, v := range opts.Methods {
+		methods[k] = v
+	}
+	for k, v := range svcs.Methods {
+		methods[k] = v
+	}
+	opts.Methods = methods
+	if svcs.OnStop != nil {
+		prev := opts.OnStop
+		opts.OnStop = func(ctx context.Context) error {
+			var errs []error
+			if prev != nil {
+				errs = append(errs, prev(ctx))
+			}
+			return errors.Join(append(errs, svcs.OnStop(ctx))...)
+		}
+	}
+	return opts
 }
