@@ -25,6 +25,7 @@ var (
 	barrierTimeout = 10 * time.Second
 	interruptWait  = 10 * time.Second // D-016: how long Interrupt waits for "cancelled"
 	closeWait      = 3 * time.Second  // in-flight turn on Close, as for Claude (D-010)
+	exitWait       = 2 * time.Second  // how long a crash report waits for the exit status
 )
 
 const (
@@ -394,6 +395,12 @@ func (s *session) failure(ts *turnState, res promptResult, err error, usage runt
 		if ts.gen.killed.Load() && stop != "" {
 			kind = stop
 		} else if kind == runtime.FailCrashed {
+			// stdout can end before stderr is fully copied; once the process is reaped
+			// (cmd.Wait), the copy is complete.
+			select {
+			case <-ts.gen.p.Done():
+			case <-time.After(exitWait):
+			}
 			if tail := ts.gen.stderr.String(); tail != "" {
 				msg += ": " + tail
 			}

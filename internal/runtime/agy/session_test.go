@@ -687,6 +687,7 @@ func TestConcurrentTurnsStartOneProcess(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, "1")
 	s := h.open()
+	// "hang" keeps the first turn open until the interrupt, so every other call overlaps it.
 	var wg sync.WaitGroup
 	chans := make(chan (<-chan runtime.Event), 8)
 	errs := make(chan error, 8)
@@ -694,7 +695,7 @@ func TestConcurrentTurnsStartOneProcess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ch, err := s.Turn(context.Background(), runtime.TurnInput{Text: "ok"})
+			ch, err := s.Turn(context.Background(), runtime.TurnInput{Text: "hang"})
 			if err != nil {
 				errs <- err
 				return
@@ -705,18 +706,22 @@ func TestConcurrentTurnsStartOneProcess(t *testing.T) {
 	wg.Wait()
 	close(chans)
 	close(errs)
-	n := 0
-	for ch := range chans {
-		n++
-		mustComplete(t, terminal(t, drain(t, ch)), "Hello")
-	}
 	for err := range errs {
 		if !errors.Is(err, runtime.ErrTurnInProgress) {
 			t.Errorf("unexpected: %v", err)
 		}
 	}
-	if n != 1 {
-		t.Fatalf("%d concurrent turns started", n)
+	if len(chans) != 1 {
+		t.Fatalf("%d concurrent turns started", len(chans))
+	}
+	ch := <-chans
+	started(t, ch)
+	if err := s.Interrupt(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mustFail(t, terminal(t, drain(t, ch)), runtime.FailInterrupted)
+	if n := h.launches(); n != 1 {
+		t.Errorf("%d processes", n)
 	}
 }
 

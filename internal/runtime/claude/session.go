@@ -600,7 +600,13 @@ func (s *session) dispatch(g *proc, line []byte) {
 			s.log.Notef(rawlog.Note, "claude: undecodable control request: %v", err)
 		}
 		if req.Subtype == "can_use_tool" {
-			go s.permission(g, env.RequestID, req, env.Request)
+			// Register the cancel func here, in stream order: a control_cancel_request
+			// read right after must find it even before the goroutine runs.
+			ctx, cancel := context.WithCancel(s.life)
+			s.mu.Lock()
+			g.perms[env.RequestID] = cancel
+			s.mu.Unlock()
+			go s.permission(ctx, cancel, g, env.RequestID, req, env.Request)
 			return
 		}
 		if err := s.write(g, errorResponse(env.RequestID, "OpenChef does not support "+req.Subtype)); err != nil {
@@ -730,11 +736,7 @@ func (s *session) onResult(g *proc, line []byte) {
 // permission answers a can_use_tool request. Each request runs in its own goroutine
 // with a context cancelled on interrupt, Close or control_cancel_request; requests
 // outside an OpenChef turn are denied.
-func (s *session) permission(g *proc, requestID string, req canUseToolRequest, raw json.RawMessage) {
-	ctx, cancel := context.WithCancel(s.life)
-	s.mu.Lock()
-	g.perms[requestID] = cancel
-	s.mu.Unlock()
+func (s *session) permission(ctx context.Context, cancel context.CancelFunc, g *proc, requestID string, req canUseToolRequest, raw json.RawMessage) {
 	defer func() {
 		cancel()
 		s.mu.Lock()
