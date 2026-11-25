@@ -149,3 +149,40 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   schema changes.
 - **Decision:** (b), only between turns, and back without the schema when a later turn
   has none. Cost: one process start and likely a prompt-cache miss on that turn.
+
+## D-012 — Claude: an interrupt that finds the message still queued replaces the process
+*2026-11-25 · M2.3 · amends D-009*
+
+- **Context:** D-009 said messages reported in `still_queued` are subtracted from the
+  owed-result count. The protocol does not say whether a still-queued message is
+  dropped or will still run after the interrupt; if it runs, its late `result` would be
+  credited to the next turn (the D-005 failure mode).
+- **Options:** (a) subtract and trust that no result follows; (b) wait for a result
+  that may never come; (c) kill the process and let the next turn re-spawn it.
+- **Challenge (self-review):** killing discards a message the user wanted interrupted
+  anyway, so nothing is lost; the only cost is latency on the next turn.
+- **Decision:** (c). It is correct under both readings, costs one process start, and
+  only happens when an interrupt lands before Claude picked up the message.
+- **Consequences:** test `TestInterruptOfQueuedMessageReplacesProcess`.
+
+## D-013 — Claude: `--resume` only after the first result; one fallback on start failure
+*2026-11-25 · M2.3 · live check with claude 2.1.325*
+
+- **Context:** a replacement process (D-011 schema change, D-009/D-012 kill, crash)
+  continues the conversation with `--resume`. Live check: `--resume` of a session id
+  that has no messages yet fails with `No conversation found with session ID`, while
+  starting again with the same `--session-id` works. A first turn with an output schema
+  hits exactly this case.
+- **Challenge (self-review):** "retry with the other flag" could mask real start
+  failures. It does not: the retry happens at most once, only for replacement
+  processes (never for `Open`/`Resume`), and both errors are returned joined.
+- **Decision:** the session counts as started once any process returned a `result`
+  (or when the engine calls `Resume`); before that a replacement reuses
+  `--session-id`. A process that died mid-turn may or may not have written a
+  transcript, so a failed replacement start is retried once with the other flag.
+- **Also:** `error_max_budget_usd` is classified `unknown`, not `quota_exhausted`: it
+  is a `--max-budget-usd` cap (not passed by OpenChef today), and treating it as quota
+  would park the task in `waiting_quota`.
+- **Consequences:** tests `TestStructuredOutputRespawnsAndBack`,
+  `TestCrashOnFirstTurnRecoversWithFallback`; `TestLive` covers the schema-first path
+  against the real CLI. Start failures carry the CLI's stderr tail.

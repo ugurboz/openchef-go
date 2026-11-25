@@ -56,6 +56,12 @@ type SessionSpec struct {
 	// Adapters pass them natively where the CLI supports it (Claude) and the approver
 	// enforces them for every request it sees.
 	DenyRules []string
+	// AskRules are permission rules (Claude Code syntax) that must always reach the
+	// approver, even in modes where the CLI would otherwise decide by itself.
+	AskRules []string
+	// WebAccess enables the CLI's web fetch/search tools where it has them. Off by
+	// default: under prompt injection they are an exfiltration channel (D-006).
+	WebAccess bool
 	// Env is the complete child environment (never inherited implicitly).
 	Env []string
 	// Approver decides permission requests and answers questions. Required.
@@ -152,4 +158,17 @@ func ParseMode(s string) (Mode, error) {
 		return m, nil
 	}
 	return "", fmt.Errorf("runtime: unknown permission mode %q", s)
+}
+
+// InvariantDenyRules are the built-in invariants of §9.2(1) and §8.2 that can be written
+// as permission rules (Claude Code syntax). Adapters that support native rules pass them
+// in every mode; approvers enforce them for every request they see. Bash rules are
+// best-effort (commands can be disguised); the kernel keeps authority over git (§8.2).
+var InvariantDenyRules = []string{
+	"Edit(**/.claude/**)", "Write(**/.claude/**)",
+	"Edit(**/.git/**)", "Write(**/.git/**)",
+	"Edit(**/.openchef/**)", "Write(**/.openchef/**)",
+	"Bash(git commit:*)", "Bash(git push:*)", "Bash(git reset:*)", "Bash(git rebase:*)",
+	"Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git merge:*)", "Bash(git tag:*)",
+	"Bash(git branch -D:*)", "Bash(git branch -d:*)", "Bash(git update-ref:*)",
 }
