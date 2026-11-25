@@ -323,18 +323,30 @@ func TestCrashDuringTurn(t *testing.T) {
 
 func TestContextTimeoutInterruptsTurn(t *testing.T) {
 	t.Parallel()
+	reached := 0
 	for range 10 { // the race between our timeout and Codex's "interrupted" status
-		contextTimeoutOnce(t)
+		if contextTimeoutOnce(t) {
+			reached++
+		}
+	}
+	if reached == 0 {
+		t.Fatal("the deadline never fell inside a running turn")
 	}
 }
 
-func contextTimeoutOnce(t *testing.T) {
+// contextTimeoutOnce reports whether the deadline fell inside the turn. On a loaded
+// machine it can expire during turn/start; Turn then fails with the context error,
+// which is correct but does not exercise the race.
+func contextTimeoutOnce(t *testing.T) bool {
 	t.Helper()
 	h := newHarness(t, "hang")
 	s := h.open()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	ch, err := s.Turn(ctx, runtime.TurnInput{Text: "x"})
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,6 +362,7 @@ func contextTimeoutOnce(t *testing.T) {
 	if len(h.requests("turn/interrupt")) == 0 {
 		t.Fatal("turn/interrupt was not sent")
 	}
+	return true
 }
 
 func TestSecondTurnWhileRunning(t *testing.T) {
