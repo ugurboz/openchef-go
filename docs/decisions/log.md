@@ -312,3 +312,31 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** `runtimetest.SpawnRecorder` checks the ordering against each fake
   CLI; tests `TestOnSpawnRunsBeforeFirstWrite`, `TestOnSpawnRejectKillsProcess` per
   adapter, respawn coverage in `TestStubbornInterruptKillsAndResumes`.
+
+## D-021 — Permission matching: parsed commands, opaque runners, redirections as file access
+*2026-11-26 · M4.1/M4.2*
+
+- **Context:** §9.2 requires Claude Code's rule syntax with shell commands parsed into
+  simple commands. Several cases are not covered by Claude Code's documentation.
+- **Decision:**
+  - Commands are split with `mvdan.cc/sh/v3` (Bash dialect) across lists, pipes,
+    subshells, command and process substitution, compound commands and `sh -c` strings
+    (nested up to 4 levels). Every simple command must be allowed; any deny denies.
+  - A command is *dynamic* when a word expands at run time (`$X`, `$(…)`, globs, `~user`,
+    `$'…'`), when it has variable assignments (`PATH=… x`), when it defines a function
+    (which can shadow any name), or when it runs code it receives (`eval`, `source`,
+    `xargs`, `sudo`, `exec`, `ssh`, `find -exec` …). Dynamic commands are never allowed
+    by allow rules; prefix deny rules still match their static leading words.
+  - Wrappers (`env`, `timeout`, `nice`, `nohup`, `time`, `command` …) are unwrapped, so
+    `timeout 5 rm -rf /` meets `Bash(rm:*)`.
+  - Redirection targets are file access: `>`/`>>` are checked as Write, `<` as Read,
+    with the workspace and protected-directory invariants; `~/` resolves to home.
+  - Edit rules cover Edit/Write/MultiEdit/NotebookEdit; Read rules cover Read/Grep/Glob;
+    a pattern without a slash matches at any depth; a directory pattern covers its
+    contents.
+  - A settings file with any invalid rule or unknown key fails to load.
+- **Challenge (self-review):** stricter than Claude Code in places (assignments,
+  functions), so some harmless commands ask. Asking costs a click; a bypass costs the
+  user's machine. A fuzz test found a parser-induced panic (`()0`), fixed and kept as a
+  regression; the evaluator also recovers from panics as "ask".
+- **Consequences:** `TestBypassCorpus` (23 bypass attempts), `FuzzSplit`, mode table.

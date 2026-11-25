@@ -10,6 +10,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.50.0
 	modernc.org/sqlite v1.63.0
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
