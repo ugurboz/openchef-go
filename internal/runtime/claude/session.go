@@ -130,7 +130,7 @@ func (s *session) spawn(ctx context.Context, schema json.RawMessage, fallback bo
 	resume := s.started
 	s.mu.Unlock()
 	err := s.spawnOnce(ctx, resume, schema)
-	if err == nil || !fallback || s.isClosed() {
+	if err == nil || !fallback || s.isClosed() || errors.Is(err, runtime.ErrSpawnRejected) {
 		return err
 	}
 	s.log.Notef(rawlog.Note, "claude: start with resume=%t failed, retrying with resume=%t: %v", resume, !resume, err)
@@ -161,6 +161,9 @@ func (s *session) spawnOnce(ctx context.Context, resume bool, schema json.RawMes
 	})
 	if err != nil {
 		return fmt.Errorf("claude: start: %w", err)
+	}
+	if err := s.spec.Spawned(ctx, p.Identity()); err != nil {
+		return errors.Join(fmt.Errorf("claude: %w", err), p.Close(context.WithoutCancel(ctx)))
 	}
 	g := newProc(p.Stdin, p)
 	g.stderr = stderr
