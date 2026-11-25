@@ -293,3 +293,22 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** §16 lists `internal/task`. Tests `TestTransitionTaskConcurrent`
   (16 writers, one winner), `TestCancelRacesEngine`, `TestResumeAfterRestart`,
   `TestDoneRequiresFinishedWork`, `TestNativeIDUnique`.
+## D-019 — Adapters report every process through `SessionSpec.OnSpawn`
+*2026-11-25 · M3.5 prerequisite*
+
+- **Context:** §5.1 requires each agent process to be recorded (PID + start time) before
+  the first message, but the runtime contract hid processes inside the adapters. Claude
+  also replaces its process within one conversation (stubborn interrupt, crash).
+- **Options:** (a) expose the process on `Session` after `Open`; (b) a hook the adapter
+  calls right after `procs.Start`, before any write.
+- **Challenge (self-review):** (a) is simpler but too late: `Open` already wrote the
+  handshake, so a daemon crash between start and record leaks an unrecorded process,
+  and in-session respawns would go unnoticed. A hook runs on the adapter's goroutine and
+  can block startup on a store write; that cost (one SQLite transaction) is the point.
+- **Decision:** (b). `OnSpawn(ctx, procs.Identity) error` is called for every process
+  start; an error wraps `runtime.ErrSpawnRejected`, kills the process and fails the
+  operation; Claude does not retry its resume fallback after a rejection. The engine maps
+  the first call to `store.RecordSession` and later ones to `store.SetSessionProcess`.
+- **Consequences:** `runtimetest.SpawnRecorder` checks the ordering against each fake
+  CLI; tests `TestOnSpawnRunsBeforeFirstWrite`, `TestOnSpawnRejectKillsProcess` per
+  adapter, respawn coverage in `TestStubbornInterruptKillsAndResumes`.
