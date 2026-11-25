@@ -54,6 +54,12 @@ func resumePrompt(t *task.Task, s *task.Step, total int) string {
 		"and continue.\n\n" + restate(t, s, total)
 }
 
+// recoveryPrompt is §5.3's note followed by the message the restart interrupted.
+func recoveryPrompt(s *task.Step, interrupted string) string {
+	return fmt.Sprintf("The orchestrator restarted during your last turn. Check the workspace state "+
+		"and continue Step %d.\n\n%s", s.Index, interrupted)
+}
+
 func handoffPrompt(t *task.Task, s *task.Step, total int, from, lastCommit, patch string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are taking over this step from another agent (%s) that ran out of quota. ", from)

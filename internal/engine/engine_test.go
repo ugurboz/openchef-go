@@ -592,29 +592,6 @@ func TestStubbornAgentIsReplaced(t *testing.T) {
 	h.noLiveSessions()
 }
 
-// Until recovery exists, Run refuses a task left mid-turn by a shutdown and does not
-// park it.
-func TestRunAfterShutdownNeedsRecovery(t *testing.T) {
-	t.Parallel()
-	h := newHarness(t)
-	h.claude.Push(fake.Turn{Hang: true})
-	id := h.runTask(h.verify)
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		waitFor(t, func() bool { return len(h.claude.Turns()) == 1 })
-		cancel()
-	}()
-	if err := h.engine().Run(ctx, id); !errors.Is(err, context.Canceled) {
-		t.Fatalf("first Run = %v", err)
-	}
-	if err := h.engine().Run(context.Background(), id); !errors.Is(err, ErrNeedsRecovery) {
-		t.Fatalf("second Run = %v; want ErrNeedsRecovery", err)
-	}
-	if tk := h.task(id); tk.Status != task.StatusRunning {
-		t.Fatalf("status %s; must stay running for recovery", tk.Status)
-	}
-}
-
 // A crash between the step commit and marking the step verified: the next run adopts
 // the commit instead of redoing (and mis-recording) the step.
 func TestCommittedStepIsAdopted(t *testing.T) {
@@ -647,20 +624,6 @@ func TestCommittedStepIsAdopted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Stand-in for recovery: end the interrupted turn and attempt.
-	a := h.attempts(id)
-	sessions, _ := h.db.TaskSessions(ctx, id, false)
-	turn, err := h.db.InFlightTurn(ctx, sessions[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := h.db.EndTurn(ctx, turn.ID, task.TurnInterrupted, "daemon restart"); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.db.EndAttempt(ctx, a[0].ID, task.AttemptInterrupted, "daemon restart"); err != nil {
-		t.Fatal(err)
-	}
-
 	if err := h.engine().Run(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -673,6 +636,10 @@ func TestCommittedStepIsAdopted(t *testing.T) {
 	if n := len(h.claude.Turns()); n != 1 {
 		t.Errorf("%d turns; the adopted step needs no agent", n)
 	}
+	if a := h.attempts(id); len(a) != 1 || a[0].Status != task.AttemptSucceeded {
+		t.Errorf("attempts %+v; the interrupted attempt is the one that succeeded", a)
+	}
+	h.noLiveSessions()
 }
 
 // The retry budget belongs to the step, not to each attempt.

@@ -47,6 +47,12 @@ type Router interface {
 	Route(ctx context.Context, t *task.Task, s *task.Step, exclude []string) (Agent, error)
 }
 
+// agentLookup is implemented by routers that can resolve an agent by name, so a
+// resumed attempt gets the agent's current settings (effort).
+type agentLookup interface {
+	AgentNamed(name string) (Agent, bool)
+}
+
 // Ordered routes to the first agent whose pool is not excluded, or to the task's pinned
 // agent. It is the M3 router; quota-aware selection strategies arrive in M4 (§7.4).
 type Ordered struct {
@@ -80,4 +86,14 @@ func (o *Ordered) Route(_ context.Context, t *task.Task, _ *task.Step, exclude [
 		reason = fmt.Sprintf("pinned agent %q is unavailable", t.AgentPin)
 	}
 	return Agent{}, &NoAgentError{ResumeAt: earliest, Reason: reason}
+}
+
+// AgentNamed implements agentLookup.
+func (o *Ordered) AgentNamed(name string) (Agent, bool) {
+	for _, a := range o.Agents {
+		if a.Name == name {
+			return a, true
+		}
+	}
+	return Agent{}, false
 }

@@ -23,7 +23,17 @@ const (
 	stepVerified attemptEnd = iota // next step
 	failover                       // route to another pool and try again
 	parked                         // the task left running (needs_attention, waiting_quota)
+	restart                        // a carried-over attempt could not resume: start afresh
 )
+
+// carryOver is an attempt left running by a daemon that stopped mid-step (§5.3).
+type carryOver struct {
+	a     task.Attempt
+	agent Agent
+	ref   runtime.SessionRef
+	from  int64 // the closed session row whose conversation continues
+	seq   int
+}
 
 type attemptResult struct {
 	end attemptEnd
@@ -37,12 +47,13 @@ type attemptResult struct {
 // runStep works on step i until it is verified (true) or the task is parked (false).
 func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 	s := &r.steps[i]
-	if err := r.requireNoRunningAttempt(ctx, s.Index); err != nil {
+	left, err := r.runningAttempt(ctx, s.Index)
+	if err != nil {
 		return false, err
 	}
 	// A step commit is only made after verification passed, so a commit found for a
 	// step that is not verified yet means a crash came between the two: finish it.
-	if done, err := r.adoptCommit(ctx, i); err != nil || done {
+	if done, err := r.adoptCommit(ctx, i, left); err != nil || done {
 		return done, err
 	}
 	if s.Status == task.StepFailed {
@@ -61,15 +72,27 @@ func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 	retries := 0 // feedback turns on this step, across attempts (§7.2: per step)
 	kind, msg := task.TurnPrompt, stepPrompt(&r.t, s, len(r.steps))
 	var earliestReset time.Time // of the pools excluded so far
+	var co *carryOver
+	if left != nil {
+		if co, kind, msg, err = r.carryOver(ctx, i, left); err != nil {
+			return false, err
+		}
+	}
 	for {
-		agent, err := r.e.cfg.Router.Route(ctx, &r.t, s, exclude)
-		if errors.Is(err, ErrNoAgent) {
-			return false, r.noAgent(ctx, err, earliestReset)
+		var agent Agent
+		if co != nil {
+			agent = co.agent
+		} else {
+			agent, err = r.e.cfg.Router.Route(ctx, &r.t, s, exclude)
+			if errors.Is(err, ErrNoAgent) {
+				return false, r.noAgent(ctx, err, earliestReset)
+			}
+			if err != nil {
+				return false, fmt.Errorf("engine: route step %d: %w", s.Index, err)
+			}
 		}
-		if err != nil {
-			return false, fmt.Errorf("engine: route step %d: %w", s.Index, err)
-		}
-		res, err := r.attempt(ctx, i, agent, kind, msg, &retries)
+		res, err := r.attempt(ctx, i, agent, kind, msg, &retries, co)
+		co = nil
 		if err != nil {
 			return false, err
 		}
@@ -78,6 +101,8 @@ func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 			return true, nil
 		case parked:
 			return false, nil
+		case restart:
+			kind, msg = task.TurnPrompt, stepPrompt(&r.t, s, len(r.steps))
 		case failover:
 			exclude = append(exclude, res.pool)
 			if !res.resetsAt.IsZero() && (earliestReset.IsZero() || res.resetsAt.Before(earliestReset)) {
@@ -91,21 +116,97 @@ func (r *run) runStep(ctx context.Context, i int) (bool, error) {
 	}
 }
 
-func (r *run) requireNoRunningAttempt(ctx context.Context, step int) error {
+// runningAttempt returns the attempt at a step still recorded as running (left by a
+// daemon that stopped), or nil.
+func (r *run) runningAttempt(ctx context.Context, step int) (*task.Attempt, error) {
 	attempts, err := r.e.cfg.Store.Attempts(ctx, r.t.ID)
 	if err != nil {
-		return fmt.Errorf("engine: %w", err)
+		return nil, fmt.Errorf("engine: %w", err)
 	}
 	for i := range attempts {
 		if attempts[i].StepIndex == step && attempts[i].Status == task.AttemptRunning {
-			return fmt.Errorf("engine: task %s step %d attempt %d: %w", r.t.ID, step, attempts[i].ID, ErrNeedsRecovery)
+			return &attempts[i], nil
 		}
 	}
-	return nil
+	return nil, nil //nolint:nilnil // no attempt left running is the normal case
+}
+
+// settle stops whatever an earlier daemon left of an attempt: kills a process that is
+// somehow still alive, closes its sessions and ends turns left in flight. It returns
+// the last session and the message of the interrupted turn, if any.
+func (r *run) settle(ctx context.Context, a *task.Attempt) (*task.Session, string, error) {
+	db := r.e.cfg.Store
+	sessions, err := db.Sessions(ctx, a.ID)
+	if err != nil {
+		return nil, "", fmt.Errorf("engine: %w", err)
+	}
+	var interrupted string
+	for i := range sessions {
+		s := &sessions[i]
+		if s.State != task.SessionClosed {
+			if err := killLeftover(s); err != nil {
+				return nil, "", err
+			}
+			if err := db.CloseSession(ctx, s.ID); err != nil {
+				return nil, "", fmt.Errorf("engine: %w", err)
+			}
+		}
+		if turn, err := db.InFlightTurn(ctx, s.ID); err == nil {
+			interrupted = turn.Message
+			if err := db.EndTurn(ctx, turn.ID, task.TurnInterrupted, "daemon restart"); err != nil {
+				return nil, "", fmt.Errorf("engine: %w", err)
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return nil, "", fmt.Errorf("engine: %w", err)
+		}
+	}
+	if len(sessions) == 0 {
+		return nil, interrupted, nil
+	}
+	return &sessions[len(sessions)-1], interrupted, nil
+}
+
+// carryOver prepares to continue an attempt left running by a previous daemon: its
+// conversation is resumed with the recovery note and the interrupted message (§5.3). An
+// attempt whose session never reported a native id cannot be resumed; it ends and the
+// step starts a fresh attempt.
+func (r *run) carryOver(ctx context.Context, i int, a *task.Attempt) (*carryOver, task.TurnKind, string, error) {
+	s := &r.steps[i]
+	last, interrupted, err := r.settle(ctx, a)
+	if err != nil {
+		return nil, "", "", err
+	}
+	fresh := stepPrompt(&r.t, s, len(r.steps))
+	if last == nil || last.NativeID == "" {
+		if err := r.e.cfg.Store.EndAttempt(ctx, a.ID, task.AttemptInterrupted, "daemon restart before the session started"); err != nil {
+			return nil, "", "", fmt.Errorf("engine: %w", err)
+		}
+		return nil, task.TurnPrompt, fresh, nil
+	}
+	agent := Agent{Name: a.Agent, Runtime: a.Runtime, Model: a.Model, Pool: a.Pool}
+	if l, ok := r.e.cfg.Router.(agentLookup); ok {
+		if known, ok := l.AgentNamed(a.Agent); ok {
+			agent = known
+		}
+	}
+	if interrupted == "" {
+		interrupted = fresh
+	}
+	sessions, err := r.e.cfg.Store.Sessions(ctx, a.ID)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("engine: %w", err)
+	}
+	r.publish(Event{Kind: EventNotice, Step: s.Index, Attempt: a.ID, Agent: agent.Name,
+		Message: "resuming the session interrupted by a daemon restart"})
+	co := &carryOver{
+		a: *a, agent: agent, from: last.ID, seq: len(sessions) + 1,
+		ref: runtime.SessionRef{Runtime: last.Runtime, ID: last.NativeID},
+	}
+	return co, task.TurnRecovery, recoveryPrompt(s, interrupted), nil
 }
 
 // adoptCommit marks step i verified if the branch already has its commit.
-func (r *run) adoptCommit(ctx context.Context, i int) (bool, error) {
+func (r *run) adoptCommit(ctx context.Context, i int, left *task.Attempt) (bool, error) {
 	s := &r.steps[i]
 	sha, found, err := r.wt.FindStepCommit(ctx, r.t.BaseCommit, string(r.t.ID), s.Index)
 	if err != nil {
@@ -124,8 +225,18 @@ func (r *run) adoptCommit(ctx context.Context, i int) (bool, error) {
 			return false, err
 		}
 	}
+	if left != nil {
+		if _, _, err := r.settle(ctx, left); err != nil {
+			return false, err
+		}
+	}
 	if err := r.stepTo(ctx, i, task.StepVerified, store.StepChange{VerifiedCommit: sha}); err != nil {
 		return false, err
+	}
+	if left != nil {
+		if err := r.e.cfg.Store.EndAttempt(ctx, left.ID, task.AttemptSucceeded, "verified before a restart"); err != nil {
+			return false, fmt.Errorf("engine: %w", err)
+		}
 	}
 	r.publish(Event{Kind: EventStepFinished, Step: s.Index, Status: string(task.StepVerified),
 		Message: sha + " (found after a restart)"})
@@ -159,22 +270,41 @@ func (r *run) stepTo(ctx context.Context, i int, to task.StepStatus, c store.Ste
 
 // attempt is one agent's work on step i: one session (resumed once after a crash) and
 // as many turns as the retry budget allows.
-func (r *run) attempt(ctx context.Context, i int, agent Agent, kind task.TurnKind, msg string, retries *int) (attemptResult, error) {
+func (r *run) attempt(ctx context.Context, i int, agent Agent, kind task.TurnKind, msg string, retries *int, co *carryOver) (attemptResult, error) {
 	s := &r.steps[i]
 	lim := r.e.cfg.Limits
-	a := task.Attempt{TaskID: r.t.ID, StepIndex: s.Index, Agent: agent.Name, Runtime: agent.Runtime, Model: agent.Model, Pool: agent.Pool}
-	if err := r.e.cfg.Store.StartAttempt(ctx, &a); err != nil {
-		return attemptResult{}, fmt.Errorf("engine: %w", err)
-	}
-	r.publish(Event{Kind: EventAttemptStarted, Step: s.Index, Attempt: a.ID, Agent: agent.Name})
-
+	var a task.Attempt
 	seq := 1
-	ls, err := r.openSession(ctx, &a, agent, nil, 0, seq)
-	if err != nil {
-		if stoppedBy(err) || ctx.Err() != nil {
-			return attemptResult{}, err
+	var ls *liveSession
+	var err error
+	if co != nil {
+		a, seq = co.a, co.seq
+		ls, err = r.openSession(ctx, &a, agent, &co.ref, co.from, seq)
+		if err != nil {
+			if stoppedBy(err) || ctx.Err() != nil {
+				return attemptResult{}, err
+			}
+			reason := "resume after restart failed: " + err.Error()
+			if err := r.e.cfg.Store.EndAttempt(ctx, a.ID, task.AttemptInterrupted, reason); err != nil {
+				return attemptResult{}, fmt.Errorf("engine: %w", err)
+			}
+			r.publish(Event{Kind: EventAttemptEnded, Step: s.Index, Attempt: a.ID, Agent: agent.Name,
+				Status: string(task.AttemptInterrupted), Message: reason})
+			return attemptResult{end: restart}, nil
 		}
-		return r.giveUp(ctx, i, &a, nil, "agent "+agent.Name+" could not start: "+err.Error())
+	} else {
+		a = task.Attempt{TaskID: r.t.ID, StepIndex: s.Index, Agent: agent.Name, Runtime: agent.Runtime, Model: agent.Model, Pool: agent.Pool}
+		if err := r.e.cfg.Store.StartAttempt(ctx, &a); err != nil {
+			return attemptResult{}, fmt.Errorf("engine: %w", err)
+		}
+		r.publish(Event{Kind: EventAttemptStarted, Step: s.Index, Attempt: a.ID, Agent: agent.Name})
+		ls, err = r.openSession(ctx, &a, agent, nil, 0, seq)
+		if err != nil {
+			if stoppedBy(err) || ctx.Err() != nil {
+				return attemptResult{}, err
+			}
+			return r.giveUp(ctx, i, &a, nil, "agent "+agent.Name+" could not start: "+err.Error())
+		}
 	}
 	defer func() {
 		if cerr := r.closeSession(ctx, ls); cerr != nil {

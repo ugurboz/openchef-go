@@ -25,6 +25,10 @@ const helperEnv = "OPENCHEF_ENGINE_HELPER"
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperEnv); mode != "" {
 		name, arg, _ := strings.Cut(mode, ":")
+		if name == "sleep" {
+			time.Sleep(time.Hour)
+			os.Exit(0)
+		}
 		if name == "check" {
 			if _, err := os.Stat(arg); err != nil {
 				fmt.Printf("missing %s\n", arg)
@@ -258,3 +262,5 @@ func writeFile(name, body string) func(string) error {
 		return os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600)
 	}
 }
+
+func storeChange() store.StepChange { return store.StepChange{} }
