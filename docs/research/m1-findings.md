@@ -165,3 +165,29 @@ Recordings `testdata/claude/m17-*.jsonl`.
 | Deny rule `Write(**/.claude/**)` against `sub/.claude/settings.json` | denied (`permission_denials: [Write]`), the sibling write succeeded |
 | `--resume` in a new process | context kept; `result_index` **restarts at 0** in the new process |
 | Tools exposed by an MCP server | every tool of the server is offered to the model (`mcp__openchef__approve` appeared next to `ask_user`), so OpenChef's server must expose only `ask_user` |
+
+## 11. Follow-up spike M1.8 — agy over ACP, before the adapter
+
+Run on 2026-11-25 with `agy` 1.5.16, model `gemini-3.8-flash`, `thought_level` low
+(`spikes/agy-acp/m18.go`, recordings `testdata/agy/m18-*.jsonl`). Settings were written
+to `settings.json` in the session's own `--cli_dir_name` directory; `agy acp` has no
+`--settings` flag, and `--app-data-dir` refuses absolute paths. The task asked for a
+command write, a file edit, a command the host denies and a write outside the workspace.
+
+| Check | Result |
+|---|---|
+| `--sandbox`, `toolPermission: proceed-in-sandbox` | commands run in the sandbox **without asking**; the sandbox makes the workspace **read-only** (`operation not permitted`), blocks **network** (`Could not resolve host`) and **reads outside** the workspace; file edits ask (`m18-sandbox-reach`, `m18-review-sandbox`) |
+| …and the agent retries with `BypassSandbox: true` | the retry reaches `session/request_permission` (`rawInput.BypassSandbox: true`); allowed → runs and writes, rejected → `failed` with "Do not attempt to circumvent" (`m18-bypass`) |
+| Same with the repository under `$TMPDIR` | a write to `../outside.txt` succeeded **without asking**: the sandbox allows the temp tree (`m18-tmpdir-sandbox`) |
+| `toolPermission: request-review` / `strict`, sandbox on | every command asks, but an allowed command still fails on the read-only sandbox |
+| No sandbox, `request-review` | every command and edit asks once; allowed commands run (`m18-nosandbox-review`) |
+| ACP mode `accept-edits` | edits are applied **without asking** the host; commands still ask (`m18-nosandbox-accept`) |
+| ACP mode `auto` | commands ran **without asking**, including the "denied" one and the write outside the workspace (`m18-auto`) |
+| ACP mode `plan` | no requests; wrote `implementation_plan.md` under `~/.gemini/antigravity-cli/brain/…` (outside the workspace) without asking (`m18-plan`) |
+| `permissions.deny` in settings (`command(echo denied)`, `command(echo)`, `command(echo denied .*)`, `command(echo denied *)`) | **never enforced**: every form still reached the host as a normal request |
+| Permission options | ids are now `allow` / `deny` (Phase 0: `allow_once` / `reject_once`); the stable field is `kind` (`allow_once`, `reject_once`) |
+| `session/cancel` (notification) mid-turn | `session/prompt` returns `stopReason: "cancelled"`; the next prompt works (`m18-cancel`) |
+| `session/load` in a new process after `SIGKILL` | context kept, but the history is **replayed** as `user_message_chunk`/`agent_message_chunk` before the load response (`m18-load-resumed`) |
+| MCP server in `session/new.mcpServers` | `ask_user` worked; each call asks: `kind: "other"`, `title: "Run mcp_<server>_<tool>"`, arguments in `rawInput` (`m18-mcp`) |
+| Usage | `session/prompt` result `usage` is per turn (not cumulative); `inputTokens` excludes `cachedReadTokens`; a cancelled turn still reports its tokens. `usage_update {used,size}` is context-window fill |
+| Effort | `thought_level` options depend on the model (`low…high`, some models add `xhigh`); they are re-advertised in `config_option_update` after a model change |

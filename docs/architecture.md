@@ -280,13 +280,18 @@ Rules every adapter must follow:
 - **Transport:** `agy acp` (Agent Client Protocol, JSON-RPC over stdio), never `agy -p`,
   which runs sandboxed commands without asking and reports success on failure.
 - **Flags:** `--sandbox --disable-telemetry --include-default-customizations=false
-  --cli_dir_name openchef`.
-- **Session:** `session/new`, then `session/set_config_option` for `model` (base name,
-  e.g. `gemini-4-neon`), `thought_level` (effort: `low`…`xhigh`) and `mode`;
-  `session/prompt` per turn; `session/load` for `Resume`.
-- **Permissions:** `session/request_permission` is routed to the approval service; the
-  ACP session mode is set from the OpenChef permission mode (§9.3). The sandbox always
-  stays on.
+  --cli_dir_name openchef`. OpenChef owns `settings.json` in that directory
+  (`toolPermission: proceed-in-sandbox`, `enableTerminalSandbox: true`); the user's agy
+  configuration is never read.
+- **Session:** `session/new` (with OpenChef's `ask_user` MCP server), then
+  `session/set_config_option` for `model`, `thought_level` (effort, options per model)
+  and `mode` (always `default`, D-015); `session/prompt` per turn; `session/load` for
+  `Resume`, dropping the replayed history (D-016); `session/cancel` to interrupt.
+- **Permissions (D-015):** agy ignores native deny rules and its `auto`/`accept-edits`
+  modes bypass the host, so every OpenChef mode is applied by the approver. Commands run
+  in the sandbox unasked only while they read the workspace (no writes, network or
+  outside reads); anything else escapes with `BypassSandbox` and reaches
+  `session/request_permission`, answered by option `kind`. File edits always ask.
 - **Quota:** no L1 or L2 source. L3 estimation only (§10).
 
 ---
@@ -586,12 +591,12 @@ attached. Unanswered requests time out after 15 min as **deny**.
 
 | OpenChef mode | Claude Code | Codex (app-server) | agy (ACP) |
 |---|---|---|---|
-| `manual` | native (`--restricted`); every prompt → evaluator | `untrusted` + `workspace-write`; approvals → evaluator | `default`; requests → evaluator |
-| `acceptEdits` | native; host not consulted | file changes accepted, commands → evaluator | `accept-edits` |
-| `plan` | `dontAsk` + read-only tools `Read,Glob,Grep` (Claude's plan mode switches models, D-008) | `read-only` sandbox | `plan` |
-| `auto` | native (Claude's classifier); host not consulted | evaluator with `acceptEdits` behaviour | `auto` |
-| `dontAsk` | native (prompts refused) | evaluator, ask → deny | `default`, ask → deny |
-| `bypassPermissions` | `acceptEdits` + approver allows all but deny rules/invariants (`--restricted` refuses bypass, D-008) | evaluator: invariants and deny rules only | `auto`, invariants and deny rules only |
+| `manual` | native (`--restricted`); every prompt → evaluator | `untrusted` + `workspace-write`; approvals → evaluator | `default` + sandbox; edits and sandbox escapes → evaluator (D-015) |
+| `acceptEdits` | native; host not consulted | file changes accepted, commands → evaluator | `default`; evaluator accepts edits (invariants apply), escapes → evaluator |
+| `plan` | `dontAsk` + read-only tools `Read,Glob,Grep` (Claude's plan mode switches models, D-008) | `read-only` sandbox | `default`; evaluator denies every request (sandboxed reads only) |
+| `auto` | native (Claude's classifier); host not consulted | evaluator with `acceptEdits` behaviour | `default`; evaluator with `acceptEdits` behaviour (agy `auto` bypasses the host) |
+| `dontAsk` | native (prompts refused) | evaluator, ask → deny | `default`; evaluator, ask → deny |
+| `bypassPermissions` | `acceptEdits` + approver allows all but deny rules/invariants (`--restricted` refuses bypass, D-008) | evaluator: invariants and deny rules only | `default`; evaluator: invariants and deny rules only |
 
 **Deny rules and invariants are enforced in every mode.** For Claude, they are passed as
 native deny rules because the host is not consulted outside `manual` (M1 findings §3);
