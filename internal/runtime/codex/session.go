@@ -13,12 +13,12 @@ import (
 	"github.com/ugurboz/openchef/internal/runtime"
 	"github.com/ugurboz/openchef/internal/runtime/linerpc"
 	"github.com/ugurboz/openchef/internal/runtime/rawlog"
+	"github.com/ugurboz/openchef/internal/runtime/turnq"
 )
 
 const (
 	callTimeout     = 60 * time.Second
 	closeTimeout    = 10 * time.Second
-	eventBuffer     = 256
 	maxToolOutput   = 4 << 10
 	askUserToolName = "ask_user"
 )
@@ -49,15 +49,12 @@ func newSession(spec runtime.SessionSpec, proc *procs.Process, log *rawlog.Log) 
 	return &session{spec: spec, proc: proc, log: log, items: map[string][]string{}}
 }
 
-// turnState tracks one turn. Events are queued without blocking and handed to the
-// consumer by a dedicated goroutine, so a consumer that stops reading can never block
-// the notification router, the approval handler, Interrupt or Close.
+// turnState tracks one turn. Its events go through a turnq.Queue (D-002).
 type turnState struct {
+	q          *turnq.Queue
+	ch         <-chan runtime.Event
 	mu         sync.Mutex
-	cond       *sync.Cond
-	queue      []runtime.Event
 	id         string
-	ch         chan runtime.Event
 	started    time.Time
 	wantSchema bool
 	final      string
@@ -65,7 +62,6 @@ type turnState struct {
 	usageLast  tokenBreakdown
 	denials    int
 	lastErr    *turnError
-	done       bool
 	// stopReason, when set, is why OpenChef interrupted the turn (timeout, cancel,
 	// close). It wins over Codex's generic "interrupted" status, which races with it.
 	stopReason runtime.FailureKind
@@ -76,57 +72,13 @@ type turnState struct {
 }
 
 func newTurnState(wantSchema bool) *turnState {
-	ts := &turnState{ch: make(chan runtime.Event, eventBuffer), started: time.Now(), wantSchema: wantSchema}
-	ts.cond = sync.NewCond(&ts.mu)
-	go ts.deliver()
-	return ts
+	q := turnq.New()
+	return &turnState{q: q, ch: q.C(), started: time.Now(), wantSchema: wantSchema}
 }
 
-// emit queues a non-terminal event. It never blocks.
-func (ts *turnState) emit(ev runtime.Event) {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if ts.done {
-		return
-	}
-	ev.At = time.Now()
-	ts.queue = append(ts.queue, ev)
-	ts.cond.Signal()
-}
-
-// finish queues the terminal event once. It never blocks and reports whether this call
-// ended the turn.
-func (ts *turnState) finish(ev runtime.Event) bool {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if ts.done {
-		return false
-	}
-	ts.done = true
-	ev.At = time.Now()
-	ts.queue = append(ts.queue, ev)
-	ts.cond.Signal()
-	return true
-}
-
-// deliver moves queued events to the consumer's channel and closes it after the
-// terminal event. The consumer must drain the channel until it is closed.
-func (ts *turnState) deliver() {
-	for {
-		ts.mu.Lock()
-		for len(ts.queue) == 0 {
-			ts.cond.Wait()
-		}
-		ev := ts.queue[0]
-		ts.queue = ts.queue[1:]
-		ts.mu.Unlock()
-		ts.ch <- ev
-		if ev.Kind.Terminal() {
-			close(ts.ch)
-			return
-		}
-	}
-}
+func (ts *turnState) emit(ev runtime.Event)        { ts.q.Emit(ev) }
+func (ts *turnState) finish(ev runtime.Event) bool { return ts.q.Finish(ev) }
+func (ts *turnState) isDone() bool                 { return ts.q.Done() }
 
 func (ts *turnState) usage() runtime.Usage {
 	ts.mu.Lock()
@@ -178,10 +130,7 @@ func (s *session) Turn(ctx context.Context, in runtime.TurnInput) (<-chan runtim
 	if err != nil {
 		// Terminate the delivery goroutine; nobody will read this channel.
 		ts.finish(runtime.Event{Kind: runtime.EventTurnFailed, Failure: &runtime.Failure{Kind: runtime.FailProtocol, Message: err.Error()}})
-		go func() {
-			for range ts.ch { // drain: the channel is never handed to a caller
-			}
-		}()
+		ts.q.Discard()
 		s.clearTurn(ts)
 		return nil, err
 	}
@@ -202,15 +151,12 @@ func (s *session) watchContext(ctx context.Context, ts *turnState) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		kind = runtime.FailTimeout
 	}
-	ts.mu.Lock()
-	done := ts.done
-	if !done {
-		ts.stopReason = kind // set before interrupting: Codex may confirm instantly
-	}
-	ts.mu.Unlock()
-	if done {
+	if ts.isDone() {
 		return
 	}
+	ts.mu.Lock()
+	ts.stopReason = kind // set before interrupting: Codex may confirm instantly
+	ts.mu.Unlock()
 	ictx, cancel := context.WithTimeout(context.WithoutCancel(ctx), callTimeout)
 	defer cancel()
 	if err := s.Interrupt(ictx); err != nil {

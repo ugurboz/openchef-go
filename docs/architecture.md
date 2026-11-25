@@ -243,10 +243,12 @@ Rules every adapter must follow:
   files always reach the host) with an explicit `--tools` allowlist and
   `--strict-mcp-config`. Web tools are off unless the agent enables them. OpenChef's MCP
   server exposes only `ask_user`.
-- **Turn correlation (D-009):** one `result` per user message; a turn ends on the result
-  whose per-process `result_index` matches it. Interrupt waits for the owed result;
+- **Turn correlation (D-009, D-012):** one `result` per user message; a turn ends on the
+  result whose per-process `result_index` matches it. Interrupt waits for the owed
+  result; if the message was still queued, or no result comes, the process is replaced.
   Close kills fast when a turn is in flight (D-010). A per-turn output schema re-spawns
-  the process with `--resume --json-schema` between turns (D-011).
+  the process with `--json-schema` between turns (D-011); replacements use `--resume`
+  once the session has a transcript and `--session-id` before (D-013).
 - **Quota:** L1 from `rate_limit_event` (fractions, epoch resets); L2 probe (§10).
 
 ### 6.3 Codex CLI (`codex`)

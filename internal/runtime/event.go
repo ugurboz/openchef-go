@@ -91,7 +91,10 @@ type TurnResult struct {
 	Structured json.RawMessage `json:"structured,omitempty"`
 	Usage      Usage           `json:"usage"`
 	// Denials counts permission requests refused during the turn.
-	Denials  int           `json:"denials"`
+	Denials int `json:"denials"`
+	// Models lists the models that actually served the turn, where the CLI reports it;
+	// it can differ from the requested model (e.g. Claude's plan mode, D-008).
+	Models   []string      `json:"models,omitempty"`
 	Duration time.Duration `json:"duration"`
 }
 
