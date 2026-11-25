@@ -31,7 +31,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
@@ -41,4 +41,4 @@ jobs:
         shell: bash
         env:
           COUNT: ${{ inputs.count || '50' }}
-        run: go test -race -count="$COUNT" ./internal/procs/... ./internal/store/... ./internal/runtime/...
+        run: go test -race -timeout 45m -count="$COUNT" ./internal/procs/... ./internal/store/... ./internal/runtime/...

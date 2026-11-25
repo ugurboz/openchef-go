@@ -66,6 +66,9 @@ type turnState struct {
 	denials    int
 	lastErr    *turnError
 	done       bool
+	// stopReason, when set, is why OpenChef interrupted the turn (timeout, cancel,
+	// close). It wins over Codex's generic "interrupted" status, which races with it.
+	stopReason runtime.FailureKind
 	// early holds turn-scoped notifications that arrived while the turn id was still
 	// unknown. They are replayed once the id is known; those of other (stale) turns are
 	// then discarded.
@@ -195,8 +198,15 @@ func (s *session) watchContext(ctx context.Context, ts *turnState) {
 	case <-s.peer.Done():
 		return
 	}
+	kind := runtime.FailInterrupted
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		kind = runtime.FailTimeout
+	}
 	ts.mu.Lock()
 	done := ts.done
+	if !done {
+		ts.stopReason = kind // set before interrupting: Codex may confirm instantly
+	}
 	ts.mu.Unlock()
 	if done {
 		return
@@ -205,10 +215,6 @@ func (s *session) watchContext(ctx context.Context, ts *turnState) {
 	defer cancel()
 	if err := s.Interrupt(ictx); err != nil {
 		s.log.Notef(rawlog.Note, "codex: interrupt after context end failed: %v", err)
-	}
-	kind := runtime.FailInterrupted
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		kind = runtime.FailTimeout
 	}
 	s.endTurn(ts, runtime.Event{Kind: runtime.EventTurnFailed, Failure: &runtime.Failure{
 		Kind: kind, Message: "turn context ended: " + ctx.Err().Error(), Usage: ts.usage(),
@@ -470,7 +476,7 @@ func (s *session) onNotification(n linerpc.Notification) {
 func (s *session) completion(ts *turnState, p turnCompletedNotification) runtime.Event {
 	usage := ts.usage()
 	ts.mu.Lock()
-	final, lastErr, denials, want := ts.final, ts.lastErr, ts.denials, ts.wantSchema
+	final, lastErr, denials, want, stop := ts.final, ts.lastErr, ts.denials, ts.wantSchema, ts.stopReason
 	duration := time.Since(ts.started)
 	ts.mu.Unlock()
 	if p.Turn.DurationMs != nil {
@@ -485,8 +491,12 @@ func (s *session) completion(ts *turnState, p turnCompletedNotification) runtime
 		}
 		return runtime.Event{Kind: runtime.EventTurnCompleted, Result: res}
 	case "interrupted":
+		kind := runtime.FailInterrupted
+		if stop != "" {
+			kind = stop
+		}
 		return runtime.Event{Kind: runtime.EventTurnFailed, Failure: &runtime.Failure{
-			Kind: runtime.FailInterrupted, Message: "turn interrupted", Usage: usage,
+			Kind: kind, Message: "turn interrupted", Usage: usage,
 		}}
 	default:
 		te := p.Turn.Error

@@ -323,6 +323,13 @@ func TestCrashDuringTurn(t *testing.T) {
 
 func TestContextTimeoutInterruptsTurn(t *testing.T) {
 	t.Parallel()
+	for range 10 { // the race between our timeout and Codex's "interrupted" status
+		contextTimeoutOnce(t)
+	}
+}
+
+func contextTimeoutOnce(t *testing.T) {
+	t.Helper()
 	h := newHarness(t, "hang")
 	s := h.open()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
