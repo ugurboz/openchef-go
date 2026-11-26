@@ -29,6 +29,8 @@ const (
 	fakeEnv      = "OPENCHEF_FAKE_CLAUDE"
 	fakeLogEnv   = "OPENCHEF_FAKE_LOG"
 	fakeStateEnv = "OPENCHEF_FAKE_STATE"
+	// approverStartedFile, in the state directory, says the test's approver is waiting.
+	approverStartedFile = "approver-started"
 )
 
 func TestMain(m *testing.M) {
@@ -351,7 +353,15 @@ func (f *fake) fakeTurn(text string) {
 		sent := make(chan struct{})
 		go f.permissionSent("perm-2", "Bash", map[string]any{"command": "sleep 100"}, sent)
 		<-sent
-		time.Sleep(200 * time.Millisecond)
+		// Cancel only once the approver is really waiting: a fixed delay lost the race
+		// on a loaded Windows runner, the turn ended first and the adapter rightly
+		// refused the request without asking.
+		marker := filepath.Join(os.Getenv(fakeStateEnv), approverStartedFile)
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(marker); err == nil {
+				break
+			}
+		}
 		f.send(map[string]any{"type": "control_cancel_request", "request_id": "perm-2"})
 		time.Sleep(200 * time.Millisecond)
 		f.result("success", false, "cancelled", nil)
