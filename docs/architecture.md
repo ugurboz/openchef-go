@@ -796,8 +796,10 @@ Model selection keys (`tier`, `strategy`, `weights`, `[importance]`) are describ
 ```
 cmd/openchef/            main package (CLI, TUI entry, daemon entry)
 internal/
-  api/                   JSON-RPC types and server/client
-  daemon/                lifecycle, single-instance lock, recovery
+  api/                   JSON-RPC types and client
+  app/                   composition root: builds the daemon from configuration
+  daemon/                lifecycle, single-instance lock, socket server, task API handlers
+  service/               application layer: run, cancel, retry, watch, recovery, quota wake-ups
   task/                  domain model: tasks, steps, attempts, sessions, turns, state machines
   engine/                step execution, retries, failover (drives package task)
   router/                agent selection

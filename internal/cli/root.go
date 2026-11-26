@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -30,6 +31,9 @@ type IO struct {
 type Deps struct {
 	Detector doctor.Detector
 	Paths    func() (config.Paths, error)
+	// StartDaemon starts a background daemon when a command needs one; nil launches
+	// this executable's `daemon run` detached.
+	StartDaemon func(ctx context.Context, paths config.Paths) error
 }
 
 // DefaultDeps uses the real environment.
@@ -66,6 +70,11 @@ func NewRootCommandWith(streams IO, deps Deps) *cobra.Command {
 		newDoctorCommand(deps),
 		newInitCommand(deps),
 		newDaemonCommand(deps),
+		newRunCommand(deps),
+		newStatusCommand(deps),
+		newLogsCommand(deps),
+		newCancelCommand(deps),
+		newRetryCommand(deps),
 	)
 	return root
 }

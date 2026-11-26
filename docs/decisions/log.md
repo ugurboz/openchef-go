@@ -314,6 +314,25 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   CLI; tests `TestOnSpawnRunsBeforeFirstWrite`, `TestOnSpawnRejectKillsProcess` per
   adapter, respawn coverage in `TestStubbornInterruptKillsAndResumes`.
 
+## D-020 — M3 permission policy: file edits inside the worktree only
+*2026-11-25 · M3.8*
+
+- **Context:** `openchef run` drives real CLIs from M3 on, but the permission evaluator,
+  shell parsing and approval queue (§9) are M4. Something must answer approval requests
+  now.
+- **Options:** (a) allow everything (`bypassPermissions`); (b) allow file changes inside
+  the task's worktree, refuse commands and other tools; (c) wait for M4 before running
+  real CLIs.
+- **Challenge (self-review):** (b) blocks agents from running tests themselves, which
+  lowers first-try quality. But (a) lets an injected prompt run arbitrary commands with
+  the user's credentials, and (c) leaves M3 untestable end to end. OpenChef runs the
+  verification command itself and feeds failures back, so (b) still closes the loop.
+- **Decision:** (b): `acceptEdits` mode, invariant deny rules, an approver that allows a
+  file change only when every path is inside the worktree and outside `.git`,
+  `.openchef` and `.claude`, and denies commands/tools with an explanation; questions get
+  "decide yourself and say so". Subscription pools lose API key variables (§13).
+- **Consequences:** replaced by the M4 evaluator; until then agents cannot run tests.
+
 ## D-021 — Permission matching: parsed commands, opaque runners, redirections as file access
 *2026-11-26 · M4.1/M4.2*
 

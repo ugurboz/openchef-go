@@ -8,6 +8,9 @@ on:
       - "internal/procs/**"
       - "internal/store/**"
       - "internal/runtime/**"
+      - "internal/engine/**"
+      - "internal/service/**"
+      - "internal/e2e/**"
       - "internal/verify/**"
       - ".github/workflows/stress.yml"
   workflow_dispatch:
@@ -42,4 +45,4 @@ jobs:
         shell: bash
         env:
           COUNT: ${{ inputs.count || '50' }}
-        run: go test -race -timeout 45m -count="$COUNT" ./internal/procs/... ./internal/store/... ./internal/runtime/... ./internal/verify/...
+        run: go test -race -timeout 45m -count="$COUNT" ./internal/procs/... ./internal/store/... ./internal/runtime/... ./internal/engine/... ./internal/service/... ./internal/e2e/... ./internal/verify/...
