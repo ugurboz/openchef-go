@@ -58,3 +58,44 @@ func TestFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestStepCosts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openDomain(t)
+	at := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	for i, c := range []struct {
+		pool  string
+		share float64
+	}{{"a", 0.01}, {"a", 0.02}, {"b", 0.5}, {"a", 0.03}} {
+		if err := db.RecordStepCost(ctx, c.pool, 0, c.share, at.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.StepCosts(ctx, 2)
+	if err != nil || len(got["a"]) != 2 || got["a"][0] != 0.02 || got["a"][1] != 0.03 || len(got["b"]) != 1 {
+		t.Fatalf("costs %v, %v", got, err)
+	}
+	if err := db.RecordStepCost(ctx, "a", 0, 1.5, at); err == nil {
+		t.Fatal("share above 1 stored")
+	}
+}
+
+func TestSpend(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openDomain(t)
+	at := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	for i, usd := range []float64{0.5, 1.25, 2} {
+		if err := db.RecordSpend(ctx, "api", usd, at.Add(time.Duration(i)*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.SpendSince(ctx, at.Add(30*time.Minute))
+	if err != nil || len(got["api"]) != 2 || got["api"][0].USD != 1.25 || !got["api"][1].At.Equal(at.Add(2*time.Hour)) {
+		t.Fatalf("spend %v, %v", got, err)
+	}
+	if err := db.RecordSpend(ctx, "api", -1, at); err == nil {
+		t.Fatal("negative spend stored")
+	}
+}

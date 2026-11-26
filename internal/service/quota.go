@@ -23,6 +23,8 @@ const (
 	quotaHistory = 8 * 24 * time.Hour
 	// observationBuffer bounds observations waiting to be stored.
 	observationBuffer = 256
+	// costHistory is how many step costs per pool are kept for estimates.
+	costHistory = 20
 )
 
 // QuotaDeps are the quota monitor's collaborators.
@@ -33,6 +35,16 @@ type QuotaDeps struct {
 	Interval time.Duration
 	Now      func() time.Time
 	Log      *slog.Logger
+	// Budgets lists every API pool with its USD limits (§10.3); only these pools'
+	// spending is recorded (subscriptions report notional costs that bill nothing).
+	Budgets map[string]Budget
+	// Location decides when a day and a month begin for budgets; nil is local time.
+	Location *time.Location
+}
+
+// Budget is an API pool's spending limit; zero fields are unlimited.
+type Budget struct {
+	DailyUSD, MonthlyUSD float64
 }
 
 // Quota tracks every pool's quota (§10): it merges L1 observations from agent streams
@@ -46,10 +58,43 @@ type Quota struct {
 	now      func() time.Time
 	log      *slog.Logger
 
-	pending chan quota.Observation
+	pending chan record
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	refresh sync.Mutex // one manual refresh at a time
+
+	budgets map[string]Budget
+	loc     *time.Location
+
+	mu      sync.Mutex
+	costs   map[string][]float64     // pool → recent step costs, oldest first (L3)
+	started map[int64]attemptStart   // attempts in flight
+	spent   map[string][]store.Spend // API pools' spending this month
+}
+
+// record is one write for the background writer: an observation or a step cost.
+type record struct {
+	obs   *quota.Observation
+	cost  *stepCost
+	spend *spendRecord
+}
+
+type spendRecord struct {
+	pool string
+	usd  float64
+	at   time.Time
+}
+
+type stepCost struct {
+	pool    string
+	attempt int64
+	share   float64
+	at      time.Time
+}
+
+type attemptStart struct {
+	pool  string
+	state quota.State
 }
 
 // NewQuota builds the monitor. Call Start before use.
@@ -58,7 +103,11 @@ func NewQuota(d QuotaDeps) (*Quota, error) {
 		return nil, errors.New("service: quota needs a store")
 	}
 	q := &Quota{db: d.Store, probes: d.Probes, interval: d.Interval, now: d.Now, log: d.Log,
-		pending: make(chan quota.Observation, observationBuffer)}
+		pending: make(chan record, observationBuffer), costs: map[string][]float64{}, started: map[int64]attemptStart{},
+		budgets: d.Budgets, loc: d.Location, spent: map[string][]store.Spend{}}
+	if q.loc == nil {
+		q.loc = time.Local
+	}
 	if q.interval <= 0 {
 		q.interval = DefaultProbeInterval
 	}
@@ -85,6 +134,25 @@ func (q *Quota) Start(ctx context.Context) error {
 	}
 	for i := range past {
 		q.tracker.Observe(past[i])
+	}
+	costs, err := q.db.StepCosts(ctx, costHistory)
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	q.mu.Lock()
+	q.costs = costs
+	q.mu.Unlock()
+	spent, err := q.db.SpendSince(ctx, monthStart(q.now().In(q.loc)))
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	q.mu.Lock()
+	q.spent = spent
+	q.mu.Unlock()
+	for pool, b := range q.budgets {
+		if b.DailyUSD > 0 || b.MonthlyUSD > 0 {
+			q.tracker.Observe(q.budgetObservation(pool, q.now()))
+		}
 	}
 	flag, err := q.db.Flag(ctx, probesFlag)
 	if err != nil {
@@ -116,29 +184,160 @@ func (q *Quota) Stop() {
 // writer is behind, the observation still counts for routing but is not stored.
 func (q *Quota) Observe(o quota.Observation) {
 	q.tracker.Observe(o)
+	q.enqueue(record{obs: &o}, o.Pool)
+}
+
+func (q *Quota) enqueue(r record, pool string) {
 	select {
-	case q.pending <- o:
+	case q.pending <- r:
 	default:
-		q.log.Warn("quota observation not stored: writer behind", "pool", o.Pool)
+		q.log.Warn("quota record not stored: writer behind", "pool", pool)
 	}
 }
 
+// AttemptStarted notes the pool's state when an attempt begins, to measure its cost.
+func (q *Quota) AttemptStarted(attempt int64, pool string) {
+	s, _ := q.tracker.State(pool)
+	q.mu.Lock()
+	q.started[attempt] = attemptStart{pool: pool, state: s}
+	q.mu.Unlock()
+}
+
+// AttemptEnded records the share of its pool's window the attempt used (L3), when the
+// observations made during it can tell.
+func (q *Quota) AttemptEnded(attempt int64) {
+	q.mu.Lock()
+	st, ok := q.started[attempt]
+	delete(q.started, attempt)
+	q.mu.Unlock()
+	if !ok {
+		return
+	}
+	now, _ := q.tracker.State(st.pool)
+	share, ok := quota.Spent(&st.state, &now)
+	if !ok {
+		return
+	}
+	share = min(share, 1)
+	q.mu.Lock()
+	q.costs[st.pool] = append(q.costs[st.pool], share)
+	if c := q.costs[st.pool]; len(c) > costHistory {
+		q.costs[st.pool] = c[len(c)-costHistory:]
+	}
+	q.mu.Unlock()
+	q.enqueue(record{cost: &stepCost{pool: st.pool, attempt: attempt, share: share, at: q.now()}}, st.pool)
+}
+
+// Spend records money an API pool spent (a turn's reported cost). A pool with a budget
+// gets its spending as windows (daily_usd, monthly_usd: utilization = spent/budget,
+// reset at the next day or month), so health, admission and routing treat budgets like
+// any quota window (§10.3).
+func (q *Quota) Spend(pool string, usd float64, at time.Time) {
+	b, ok := q.budgets[pool]
+	if usd <= 0 || !ok {
+		return
+	}
+	q.enqueue(record{spend: &spendRecord{pool: pool, usd: usd, at: at}}, pool)
+	if b.DailyUSD <= 0 && b.MonthlyUSD <= 0 {
+		return // unlimited: recorded, nothing to route by
+	}
+	q.mu.Lock()
+	q.spent[pool] = append(q.spent[pool], store.Spend{USD: usd, At: at})
+	q.mu.Unlock()
+	q.tracker.Observe(q.budgetObservation(pool, at))
+}
+
+// budgetObservation turns a budget pool's spending into windows.
+func (q *Quota) budgetObservation(pool string, at time.Time) quota.Observation {
+	b := q.budgets[pool]
+	local := at.In(q.loc)
+	day, month := dayStart(local), monthStart(local)
+	var today, thisMonth float64
+	q.mu.Lock()
+	for _, sp := range q.spent[pool] {
+		if !sp.At.Before(month) {
+			thisMonth += sp.USD
+		}
+		if !sp.At.Before(day) {
+			today += sp.USD
+		}
+	}
+	q.mu.Unlock()
+	o := quota.Observation{Pool: pool, Source: quota.SourceEstimate, At: at}
+	if b.DailyUSD > 0 {
+		o.Windows = append(o.Windows, quota.Window{Name: "daily_usd", Utilization: min(today/b.DailyUSD, 1),
+			ResetsAt: day.AddDate(0, 0, 1), Duration: 24 * time.Hour})
+	}
+	if b.MonthlyUSD > 0 {
+		o.Windows = append(o.Windows, quota.Window{Name: "monthly_usd", Utilization: min(thisMonth/b.MonthlyUSD, 1),
+			ResetsAt: month.AddDate(0, 1, 0)})
+	}
+	return o
+}
+
+func dayStart(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+}
+
+func monthStart(t time.Time) time.Time {
+	y, m, _ := t.Date()
+	return time.Date(y, m, 1, 0, 0, 0, 0, t.Location())
+}
+
+// Estimate is the expected cost of the next step on pool (§10.3).
+func (q *Quota) Estimate(pool string) (float64, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return quota.Estimate(q.costs[pool])
+}
+
+// State is a pool's merged quota state.
+func (q *Quota) State(pool string) quota.State {
+	s, _ := q.tracker.State(pool)
+	return s
+}
+
+// Exhausted records that a pool ran out (a quota failure on a turn) until until, or
+// for an hour when the provider gave no reset.
+func (q *Quota) Exhausted(pool string, until time.Time) {
+	now := q.now()
+	if !until.After(now) {
+		until = now.Add(time.Hour)
+	}
+	q.Observe(quota.Observation{Pool: pool, Source: quota.SourceStream, At: now, Exhausted: true,
+		Windows: []quota.Window{{Name: "reported", Utilization: 1, ResetsAt: until}}})
+}
+
 func (q *Quota) write(ctx context.Context) {
-	save := func(o *quota.Observation) {
+	save := func(r *record) {
 		// Detached from ctx: what was observed before shutdown is still stored.
-		if err := q.db.RecordObservation(context.WithoutCancel(ctx), o); err != nil {
-			q.log.Error("store quota observation", "pool", o.Pool, "err", err)
+		wctx := context.WithoutCancel(ctx)
+		switch {
+		case r.obs != nil:
+			if err := q.db.RecordObservation(wctx, r.obs); err != nil {
+				q.log.Error("store quota observation", "pool", r.obs.Pool, "err", err)
+			}
+		case r.spend != nil:
+			if err := q.db.RecordSpend(wctx, r.spend.pool, r.spend.usd, r.spend.at); err != nil {
+				q.log.Error("store spend", "pool", r.spend.pool, "err", err)
+			}
+		case r.cost != nil:
+			c := r.cost
+			if err := q.db.RecordStepCost(wctx, c.pool, c.attempt, c.share, c.at); err != nil {
+				q.log.Error("store step cost", "pool", c.pool, "err", err)
+			}
 		}
 	}
 	for {
 		select {
-		case o := <-q.pending:
-			save(&o)
+		case r := <-q.pending:
+			save(&r)
 		case <-ctx.Done():
 			for {
 				select {
-				case o := <-q.pending:
-					save(&o)
+				case r := <-q.pending:
+					save(&r)
 				default:
 					return
 				}

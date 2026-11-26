@@ -12,7 +12,6 @@ import (
 	"maps"
 	"os"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/ugurboz/openchef/internal/config"
@@ -55,8 +54,6 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 		"codex":     codex.New(codex.Options{ClientVersion: version}),
 		"agy":       agy.New(agy.Options{ClientVersion: version}),
 	}
-	cool := &cooldowns{until: map[string]time.Time{}, now: time.Now}
-	router := &engine.Ordered{Agents: Agents(cfg), Cooldown: cool.get}
 	env := os.Environ()
 	queue := &lateQueue{}
 	pols, err := newPolicies(paths)
@@ -72,7 +69,7 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 		return daemon.Services{}, errors.Join(fmt.Errorf("app: locate home directory: %w", err), db.Close())
 	}
 	//nolint:contextcheck // probes read credentials under their own timeout, per request
-	quotas, err := service.NewQuota(service.QuotaDeps{Store: db, Probes: probesFor(cfg, userHome), Log: log})
+	quotas, err := service.NewQuota(service.QuotaDeps{Store: db, Probes: probesFor(cfg, userHome), Log: log, Budgets: budgetsFor(cfg)})
 	if err != nil {
 		return daemon.Services{}, errors.Join(err, db.Close())
 	}
@@ -80,6 +77,7 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 		return daemon.Services{}, errors.Join(err, db.Close())
 	}
 	poolOf := func(agent string) string { return cfg.Agents[agent].Pool }
+	router := newQuotaRouter(cfg, quotas, nil)
 	svc, err := service.New(service.Deps{ //nolint:contextcheck // notifications are fire-and-forget with their own timeout
 		Store: db, EventDir: paths.Sessions, Log: log, Notify: desktopNotifier(log),
 		DefaultPermissions: pols.defaultMode,
@@ -103,7 +101,7 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 				VerifyEnv:     verify.MinimalEnv(env),
 				WorktreeRoot:  paths.Worktrees,
 				SessionRoot:   paths.Sessions,
-				PoolExhausted: cool.set,
+				PoolExhausted: quotas.Exhausted,
 			})
 		},
 	})
@@ -153,34 +151,6 @@ func Agents(cfg *config.Config) []engine.Agent {
 		out = append(out, engine.Agent{Name: name, Runtime: a.Runtime, Model: a.Model, Pool: a.Pool, Effort: runtime.Effort(a.Effort)})
 	}
 	return out
-}
-
-// cooldowns remembers pools that ran out of quota until their reset. It is the M3
-// stand-in for quota tracking (§10, M4); unknown resets cool down for an hour.
-type cooldowns struct {
-	mu    sync.Mutex
-	until map[string]time.Time
-	now   func() time.Time
-}
-
-func (c *cooldowns) set(pool string, until time.Time) {
-	if until.IsZero() {
-		until = c.now().Add(time.Hour)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.until[pool] = until
-}
-
-func (c *cooldowns) get(pool string) time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	u := c.until[pool]
-	if !u.IsZero() && !c.now().Before(u) {
-		delete(c.until, pool)
-		return time.Time{}
-	}
-	return u
 }
 
 // askUserServer is the ask_user MCP server for one task's agent: this executable's
