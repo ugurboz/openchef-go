@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"sync"
 
 	"github.com/ugurboz/openchef/internal/api"
@@ -25,6 +26,9 @@ func TaskMethods(svc *service.Service) map[string]Method {
 		api.MethodTaskUnwatch: h.unwatch,
 	}
 }
+
+// maxReplay bounds the events returned by one watch.
+const maxReplay = 5000
 
 type watchKey struct {
 	conn int
@@ -72,6 +76,9 @@ func (h *taskHandlers) run(ctx context.Context, _ *Conn, params json.RawMessage)
 	p, err := decode[api.RunParams](params)
 	if err != nil {
 		return nil, err
+	}
+	if !filepath.IsAbs(p.Dir) {
+		return nil, api.RPCError(api.CodeInvalidParams, "dir must be an absolute path")
 	}
 	t, err := h.svc.Run(ctx, service.RunRequest{Prompt: p.Prompt, Dir: p.Dir, Verify: p.Verify, Agent: p.Agent})
 	if err != nil {
@@ -165,7 +172,14 @@ func (h *taskHandlers) watch(ctx context.Context, c *Conn, params json.RawMessag
 	h.watches[key] = sub
 	h.mu.Unlock()
 	go h.forward(c, key, sub)
-	return api.WatchResult{Events: past, Finished: api.Finished(string(d.Task.Status)) && !d.Driving}, nil
+	res := api.WatchResult{Status: string(d.Task.Status), Finished: api.Finished(string(d.Task.Status))}
+	// A replay must fit one JSON-RPC message; the newest events matter most.
+	if len(past) > maxReplay {
+		res.Omitted = len(past) - maxReplay
+		past = past[len(past)-maxReplay:]
+	}
+	res.Events = past
+	return res, nil
 }
 
 func (h *taskHandlers) forward(c *Conn, key watchKey, sub *service.Subscription) {

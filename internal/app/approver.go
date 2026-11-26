@@ -2,10 +2,9 @@ package app
 
 import (
 	"context"
-	"path/filepath"
-	"slices"
 	"strings"
 
+	"github.com/ugurboz/openchef/internal/pathguard"
 	"github.com/ugurboz/openchef/internal/runtime"
 )
 
@@ -17,8 +16,6 @@ import (
 type workspaceApprover struct {
 	dir string
 }
-
-var protectedDirs = []string{".git", ".openchef", ".claude"}
 
 const commandsDenied = "OpenChef M3 does not let agents run shell commands or other tools yet " +
 	"(permissions arrive in M4). Edit files only; OpenChef runs the step's verification command itself."
@@ -40,17 +37,12 @@ func (a workspaceApprover) Approve(_ context.Context, req runtime.ApprovalReques
 
 // outside explains why p may not be written, or returns "".
 func (a workspaceApprover) outside(p string) string {
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(a.dir, p)
+	why, err := pathguard.Check(a.dir, p)
+	if err != nil {
+		return "OpenChef could not check this path, so it refused the change: " + err.Error()
 	}
-	rel, err := filepath.Rel(a.dir, filepath.Clean(p))
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "Only files inside the task's workspace may be changed: " + p
-	}
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
-		if slices.Contains(protectedDirs, part) {
-			return "Files under " + part + " are managed by OpenChef and may not be changed."
-		}
+	if why != "" {
+		return strings.ToUpper(why[:1]) + why[1:] + "."
 	}
 	return ""
 }

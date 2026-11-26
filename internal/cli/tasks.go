@@ -112,17 +112,16 @@ func follow(ctx context.Context, c *api.Client, id string, r *renderer, replay b
 	if err != nil {
 		return friendly(err)
 	}
-	last := ""
+	if res.Omitted > 0 {
+		r.printf("  · %d earlier events not shown", res.Omitted)
+	}
 	for i := range res.Events {
 		if err := r.event(&res.Events[i]); err != nil {
 			return err
 		}
-		if res.Events[i].Kind == engine.EventTaskStatus {
-			last = res.Events[i].Status
-		}
 	}
 	if res.Finished {
-		return outcome(last)
+		return outcome(res.Status) // the store's status, not the last logged event
 	}
 	for {
 		select {
@@ -195,6 +194,9 @@ func newLogsCommand(deps Deps) *cobra.Command {
 			}
 			if err := c.Call(ctx, api.MethodTaskUnwatch, api.TaskParams{ID: args[0]}, nil); err != nil {
 				return err
+			}
+			if res.Omitted > 0 {
+				r.printf("  · %d earlier events not shown", res.Omitted)
 			}
 			for i := range res.Events {
 				if err := r.event(&res.Events[i]); err != nil {

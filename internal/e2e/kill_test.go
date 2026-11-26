@@ -3,9 +3,12 @@ package e2e
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,9 +25,11 @@ import (
 )
 
 const (
-	agentEnv  = "OPENCHEF_E2E_AGENT"
-	daemonEnv = "OPENCHEF_E2E_DAEMON" // home directory
-	flagEnv   = "OPENCHEF_E2E_FLAG"   // turns complete once this file exists
+	stubbornEnv   = "OPENCHEF_E2E_STUBBORN"
+	grandchildEnv = "OPENCHEF_E2E_GRANDCHILD"
+	agentEnv      = "OPENCHEF_E2E_AGENT"
+	daemonEnv     = "OPENCHEF_E2E_DAEMON" // home directory
+	flagEnv       = "OPENCHEF_E2E_FLAG"   // turns complete once this file exists
 )
 
 type allow struct{}
@@ -37,6 +42,9 @@ func (allow) Answer(context.Context, runtime.Question) (string, error) { return 
 // TestMain turns the test binary into the agent child or the daemon process.
 func TestMain(m *testing.M) {
 	switch {
+	case os.Getenv(grandchildEnv) != "":
+		time.Sleep(time.Hour)
+		os.Exit(0)
 	case os.Getenv(agentEnv) != "":
 		os.Exit(agentMain())
 	case os.Getenv(daemonEnv) != "":
@@ -60,13 +68,14 @@ func daemonMain(home, flag string) error {
 		return err
 	}
 	rt := &procRuntime{exe: exe, flag: flag}
-	return daemon.Run(context.Background(), daemon.Options{Paths: paths, Version: "e2e",
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	return daemon.Run(context.Background(), daemon.Options{Paths: paths, Version: "e2e", Log: log,
 		Init: func(ctx context.Context) (daemon.Services, error) {
 			db, err := store.Open(ctx, paths.State)
 			if err != nil {
 				return daemon.Services{}, err
 			}
-			svc, err := service.New(service.Deps{Store: db, EventDir: paths.Sessions,
+			svc, err := service.New(service.Deps{Store: db, EventDir: paths.Sessions, Log: log,
 				NewEngine: func(sink engine.Sink) (*engine.Engine, error) {
 					return engine.New(engine.Config{
 						Store: db, Runtimes: map[string]runtime.Runtime{"claude": rt}, Sink: sink,
@@ -84,12 +93,15 @@ func daemonMain(home, flag string) error {
 				return daemon.Services{}, err
 			}
 			return daemon.Services{Methods: daemon.TaskMethods(svc), OnStop: func(ctx context.Context) error {
-				return errors.Join(svc.Stop(ctx), db.Close())
+				if err := svc.Stop(ctx); err != nil {
+					return err // as app.Daemon: never close the store under runs still stopping
+				}
+				return db.Close()
 			}}, nil
 		}})
 }
 
-func startDaemon(t *testing.T, paths config.Paths, flag string) api.InitializeResult {
+func startDaemon(t *testing.T, paths config.Paths, flag string, stubborn bool) api.InitializeResult {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -97,7 +109,7 @@ func startDaemon(t *testing.T, paths config.Paths, flag string) api.InitializeRe
 	}
 	info, err := daemon.StartDetached(context.Background(), daemon.Detached{
 		Exe: exe, Args: []string{"-test.run=^$"},
-		Env:     append(os.Environ(), daemonEnv+"="+paths.Home, flagEnv+"="+flag),
+		Env:     daemonEnvFor(paths, flag, stubborn),
 		LogPath: filepath.Join(paths.Logs, "daemon.log"), Socket: paths.Socket, Timeout: 20 * time.Second,
 	})
 	if err != nil {
@@ -105,6 +117,14 @@ func startDaemon(t *testing.T, paths config.Paths, flag string) api.InitializeRe
 		t.Fatalf("start daemon: %v\n%s", err, log)
 	}
 	return info
+}
+
+func daemonEnvFor(paths config.Paths, flag string, stubborn bool) []string {
+	env := append(os.Environ(), daemonEnv+"="+paths.Home, flagEnv+"="+flag)
+	if stubborn {
+		env = append(env, stubbornEnv+"=1")
+	}
+	return env
 }
 
 func dial(t *testing.T, paths config.Paths) *api.Client {
@@ -150,7 +170,19 @@ func agentProcesses(t *testing.T, paths config.Paths, id string) []procs.Identit
 // TestKillTheDaemon is M3's exit criterion (§19): a task survives its daemon being
 // killed mid-turn, no agent process outlives the dead daemon, and the restarted daemon
 // finishes the task in the same conversation.
-func TestKillTheDaemon(t *testing.T) {
+func TestKillTheDaemon(t *testing.T) { killTheDaemon(t, false) }
+
+// TestKillTheDaemonStubbornAgent: the agent ignores SIGTERM and stdin EOF and has a
+// grandchild, so it survives its daemon; the restarted daemon's sweep (§5.3 step 2)
+// must kill both before resuming.
+func TestKillTheDaemonStubbornAgent(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("the job object kills the agent tree with its daemon on Windows")
+	}
+	killTheDaemon(t, true)
+}
+
+func killTheDaemon(t *testing.T, stubborn bool) {
 	if testing.Short() {
 		t.Skip("starts real daemon processes")
 	}
@@ -179,7 +211,7 @@ func TestKillTheDaemon(t *testing.T) {
 	flag := filepath.Join(dir, "go.flag")
 	ctx := context.Background()
 
-	first := startDaemon(t, paths, flag)
+	first := startDaemon(t, paths, flag, stubborn)
 	t.Cleanup(func() { // whatever happens, leave no daemon behind
 		if c, err := api.Dial(ctx, paths.Socket, "cleanup"); err == nil {
 			_ = c.Stop(ctx)
@@ -215,19 +247,48 @@ func TestKillTheDaemon(t *testing.T) {
 		_, err := api.Dial(ctx, paths.Socket, "probe")
 		return errors.Is(err, api.ErrNotRunning)
 	})
-	// No leaked processes: the agent dies with its daemon (Pdeathsig on Linux, stdin EOF
-	// on macOS, job object on Windows), before any new daemon could sweep it.
-	waitUntil(t, "the orphaned agent to exit", 10*time.Second, func() bool {
-		alive, err := procs.Alive(agents[0])
-		return err == nil && !alive
-	})
+	var grandchild procs.Identity
+	if stubborn {
+		// It survives its daemon, which is the point of this variant.
+		d, err := api.Dial(ctx, paths.Socket, "probe")
+		if err == nil {
+			_ = d.Close()
+			t.Fatal("daemon still answering")
+		}
+		grandchild = grandchildOf(t, paths, tk.ID)
+		time.Sleep(time.Second)
+		for _, id := range []procs.Identity{agents[0], grandchild} {
+			if alive, _ := procs.Alive(id); !alive {
+				t.Fatalf("stubborn process %d died with the daemon; the test proves nothing", id.PID)
+			}
+		}
+	} else {
+		// No leaked processes: the agent dies with its daemon (Pdeathsig on Linux,
+		// stdin EOF on macOS, job object on Windows), before any new daemon could
+		// sweep it.
+		waitUntil(t, "the orphaned agent to exit", 10*time.Second, func() bool {
+			alive, err := procs.Alive(agents[0])
+			return err == nil && !alive
+		})
+	}
 
 	if err := os.WriteFile(flag, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second := startDaemon(t, paths, flag)
+	second := startDaemon(t, paths, flag, stubborn)
 	if second.PID == first.PID {
 		t.Fatal("same daemon pid")
+	}
+	if stubborn {
+		waitUntil(t, "the sweep to kill the leftover agent and its child", 10*time.Second, func() bool {
+			a, _ := procs.Alive(agents[0])
+			g, _ := procs.Alive(grandchild)
+			return !a && !g
+		})
+		log, _ := os.ReadFile(filepath.Join(paths.Logs, "daemon.log"))
+		if !strings.Contains(string(log), "killed processes left by a previous daemon") {
+			t.Errorf("the second daemon did not report its sweep:\n%s", log)
+		}
 	}
 	c2 := dial(t, paths)
 	var d api.TaskDetail
@@ -253,4 +314,38 @@ func TestKillTheDaemon(t *testing.T) {
 	if err := c2.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// grandchildOf reads the identity of the stubborn agent's child from the file the
+// agent writes next to its workspace.
+func grandchildOf(t *testing.T, paths config.Paths, id string) procs.Identity {
+	t.Helper()
+	db, err := store.Open(context.Background(), paths.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk, err := db.Task(context.Background(), task.ID(id))
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(filepath.Dir(tk.Worktree), "grandchild-"+filepath.Base(tk.Worktree)+".pid")
+	var g procs.Identity
+	waitUntil(t, "the grandchild pid file", 10*time.Second, func() bool {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			return false
+		}
+		tok, err := procs.StartToken(pid)
+		if err != nil {
+			return false
+		}
+		g = procs.Identity{PID: pid, StartToken: tok}
+		return true
+	})
+	return g
 }

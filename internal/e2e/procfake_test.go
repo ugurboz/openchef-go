@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -115,10 +117,30 @@ func (s *procSession) Close(ctx context.Context) error {
 }
 
 // agentMain is the agent child: it reads turns until stdin closes (as real CLIs do when
-// their parent dies, §5.1) and then exits.
+// their parent dies, §5.1) and then exits. In stubborn mode it behaves like a CLI that
+// does not: it ignores SIGTERM and stdin EOF and starts a grandchild (an MCP server, a
+// dev server), whose PID it writes next to the workspace, so only OpenChef's sweep of
+// the recorded process group can clean up.
 func agentMain() int {
+	if os.Getenv(stubbornEnv) != "" {
+		ignoreTerm()
+		exe, err := os.Executable()
+		if err != nil {
+			return 3
+		}
+		cmd := exec.CommandContext(context.Background(), exe)
+		cmd.Env = append(os.Environ(), grandchildEnv+"=1", agentEnv+"=")
+		if err := cmd.Start(); err != nil {
+			return 3
+		}
+		dir, _ := os.Getwd()
+		_ = os.WriteFile(filepath.Join(filepath.Dir(dir), "grandchild-"+filepath.Base(dir)+".pid"), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
+	}
+	if os.Getenv(stubbornEnv) != "" {
+		time.Sleep(time.Hour)
 	}
 	return 0
 }

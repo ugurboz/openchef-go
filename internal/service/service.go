@@ -23,6 +23,10 @@ import (
 // ErrInvalidRequest means a request cannot be carried out as given.
 var ErrInvalidRequest = errors.New("service: invalid request")
 
+// ErrStopTimeout means Stop returned while engine runs were still stopping; their
+// store is still in use.
+var ErrStopTimeout = errors.New("service: engine runs did not stop in time")
+
 // Deps are the service's collaborators.
 type Deps struct {
 	Store *store.DB
@@ -119,12 +123,13 @@ func (s *Service) Stop(ctx context.Context) error {
 	s.cancel()
 	done := make(chan struct{})
 	go func() { s.wg.Wait(); close(done) }()
+	var err error
 	select {
 	case <-done:
 	case <-ctx.Done():
-		return fmt.Errorf("service: tasks still stopping: %w", ctx.Err())
+		err = fmt.Errorf("service: tasks still stopping: %w", ErrStopTimeout)
 	}
-	return s.events.Close()
+	return errors.Join(err, s.events.Close())
 }
 
 // RunRequest starts a single-step task (`openchef run`).
@@ -244,7 +249,8 @@ func (s *Service) Cancel(ctx context.Context, id task.ID) (task.Task, error) {
 			return task.Task{}, fmt.Errorf("service: %w", err)
 		}
 		s.mu.Lock()
-		if c := s.running[id]; c != nil {
+		c, driving := s.running[id]
+		if driving {
 			c()
 		}
 		if tm := s.timers[id]; tm != nil {
@@ -253,6 +259,9 @@ func (s *Service) Cancel(ctx context.Context, id task.ID) (task.Task, error) {
 		}
 		s.mu.Unlock()
 		s.events.Publish(engine.Event{TaskID: id, At: s.now(), Kind: engine.EventTaskStatus, Status: string(task.StatusCancelled), Message: got.Reason})
+		if !driving {
+			s.events.closeTask(id) // a driven task's log is closed when its run ends
+		}
 		return got, nil
 	}
 }
@@ -306,17 +315,17 @@ func (s *Service) drive(id task.ID) {
 	s.mu.Unlock()
 	s.wg.Go(func() {
 		defer cancel()
-		err := s.eng.Run(ctx, id)
+		runErr := s.eng.Run(ctx, id)
 		s.mu.Lock()
 		delete(s.running, id)
 		s.mu.Unlock()
 		switch {
-		case err == nil:
-		case errors.Is(err, context.Canceled) && s.life.Err() != nil:
+		case runErr == nil:
+		case errors.Is(runErr, context.Canceled) && s.life.Err() != nil:
 			return // shutdown: recovery resumes the task on next start
 		default:
-			s.log.Error("task run failed", "task", id, "err", err)
-			s.events.Publish(engine.Event{TaskID: id, At: s.now(), Kind: engine.EventNotice, Message: "run failed: " + err.Error()})
+			s.log.Error("task run failed", "task", id, "err", runErr)
+			s.events.Publish(engine.Event{TaskID: id, At: s.now(), Kind: engine.EventNotice, Message: "run failed: " + runErr.Error()})
 		}
 		t, err := s.db.Task(context.WithoutCancel(ctx), id)
 		if err != nil {
@@ -328,6 +337,12 @@ func (s *Service) drive(id task.ID) {
 			s.schedule(id, t.ResumeAt) //nolint:contextcheck // the wake-up runs on the service lifetime
 		case t.Status.Terminal():
 			s.events.closeTask(id)
+		case t.Status == task.StatusRunning && runErr == nil && s.life.Err() == nil:
+			// A Retry landed while this run was still cleaning up: its drive call
+			// was a no-op because the run was still registered, so run again. A run
+			// that failed is not restarted here, or a persistent error would spin;
+			// the next daemon start recovers it.
+			s.drive(id) //nolint:contextcheck // a run lives for the service
 		}
 	})
 }
@@ -343,13 +358,19 @@ func (s *Service) schedule(id task.ID, at time.Time) {
 	if old := s.timers[id]; old != nil {
 		old.Stop()
 	}
-	s.timers[id] = time.AfterFunc(d, func() {
+	var tm *time.Timer
+	tm = time.AfterFunc(d, func() {
 		s.mu.Lock()
+		if s.timers[id] != tm || s.stopped {
+			s.mu.Unlock()
+			return // replaced, cancelled or shutting down
+		}
 		delete(s.timers, id)
+		s.wg.Add(1) // under s.mu, so Stop cannot be waiting yet
 		s.mu.Unlock()
-		ctx := s.life
-		if _, err := s.db.TransitionTask(ctx, id, task.StatusWaitingQuota, task.StatusRunning, store.TaskChange{}); err != nil {
-			if !errors.Is(err, store.ErrConflict) {
+		defer s.wg.Done()
+		if _, err := s.db.TransitionTask(s.life, id, task.StatusWaitingQuota, task.StatusRunning, store.TaskChange{}); err != nil {
+			if !errors.Is(err, store.ErrConflict) && s.life.Err() == nil {
 				s.log.Error("wake task", "task", id, "err", err)
 			}
 			return
@@ -357,5 +378,6 @@ func (s *Service) schedule(id task.ID, at time.Time) {
 		s.events.Publish(engine.Event{TaskID: id, At: s.now(), Kind: engine.EventTaskStatus, Status: string(task.StatusRunning), Message: "quota reset; resuming"})
 		s.drive(id)
 	})
+	s.timers[id] = tm
 	s.log.Info("task waits for quota", "task", id, "resume_at", at)
 }

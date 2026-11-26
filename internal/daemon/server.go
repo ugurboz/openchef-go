@@ -128,6 +128,17 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		opts = withServices(opts, svcs)
 	}
+	started := false
+	defer func() {
+		// Init may already have resumed agents; stop them if serving never began.
+		if !started && opts.OnStop != nil {
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), StopTimeout)
+			defer cancel()
+			if err := opts.OnStop(sctx); err != nil {
+				log.Error("stop after failed start", "err", err)
+			}
+		}
+	}()
 
 	// Holding the lock, any socket file left behind belongs to a dead daemon.
 	if err := os.Remove(p.Socket); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -145,6 +156,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	started = true
 	s := &server{opts: opts, log: log, started: time.Now(), stop: make(chan struct{}), conns: map[int]*Conn{}}
 	log.Info("daemon started", "pid", os.Getpid(), "socket", p.Socket, "version", opts.Version)
 	go s.accept(ctx, ln)

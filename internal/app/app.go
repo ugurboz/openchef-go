@@ -84,7 +84,14 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 	}
 	return daemon.Services{
 		Methods: daemon.TaskMethods(svc),
-		OnStop:  func(ctx context.Context) error { return errors.Join(svc.Stop(ctx), db.Close()) },
+		OnStop: func(ctx context.Context) error {
+			if err := svc.Stop(ctx); err != nil {
+				// Runs that did not stop still use the store; the process is exiting,
+				// so leave the database to the OS rather than closing it under them.
+				return err
+			}
+			return db.Close()
+		},
 	}, nil
 }
 

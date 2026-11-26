@@ -61,8 +61,12 @@ type WatchParams struct {
 // WatchResult holds the replayed events; live ones follow as notifications.
 type WatchResult struct {
 	Events []engine.Event `json:"events"`
-	// Finished is true when the task is no longer active: no live events will follow.
+	// Status is the task's status in the store when the watch began.
+	Status string `json:"status"`
+	// Finished is true when that status produces no further events by itself.
 	Finished bool `json:"finished"`
+	// Omitted counts early events left out of a long replay.
+	Omitted int `json:"omitted,omitempty"`
 }
 
 // WatchEnded tells a client its watch was ended by the daemon.

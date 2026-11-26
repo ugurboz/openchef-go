@@ -123,7 +123,7 @@ func (r *renderer) agent(ev *runtime.Event) {
 		if r.err != nil || ev.Text == "" {
 			return
 		}
-		text := ev.Text
+		text := sanitize(ev.Text)
 		if !r.midText {
 			text = "  " + text
 		}
@@ -153,6 +153,21 @@ func (r *renderer) agent(ev *runtime.Event) {
 	}
 }
 
+// sanitize drops control characters other than newline and tab from agent text, so
+// output prompted by repository content cannot drive the terminal (ANSI/OSC escapes:
+// clipboard writes, title changes, hidden text).
+func sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // toolSummary is the most telling argument of a tool call: the command for Bash, the
 // path for file tools.
 func toolSummary(tc *runtime.ToolCall) string {
@@ -168,7 +183,7 @@ func toolSummary(tc *runtime.ToolCall) string {
 }
 
 func firstLine(s string, limit int) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	line, _, _ := strings.Cut(strings.TrimSpace(sanitize(s)), "\n")
 	if r := []rune(line); len(r) > limit {
 		return string(r[:limit-1]) + "…"
 	}
