@@ -293,6 +293,7 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** §16 lists `internal/task`. Tests `TestTransitionTaskConcurrent`
   (16 writers, one winner), `TestCancelRacesEngine`, `TestResumeAfterRestart`,
   `TestDoneRequiresFinishedWork`, `TestNativeIDUnique`.
+
 ## D-019 — Adapters report every process through `SessionSpec.OnSpawn`
 *2026-11-25 · M3.5 prerequisite*
 
