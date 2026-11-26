@@ -23,6 +23,9 @@ type recordingApprover struct {
 	err       error
 	block     bool // wait for ctx instead of deciding
 	cancelled chan struct{}
+	// started, if set, is created when a blocking Approve begins, so the fake CLI can
+	// cancel a request the approver is really waiting on (TestPermissionCancelledByClaude).
+	started   string
 	approvals []runtime.ApprovalRequest
 }
 
@@ -32,6 +35,9 @@ func (a *recordingApprover) Approve(ctx context.Context, req runtime.ApprovalReq
 	block := a.block
 	a.mu.Unlock()
 	if block {
+		if a.started != "" {
+			_ = os.WriteFile(a.started, nil, 0o600) // the fake polls for it
+		}
 		<-ctx.Done()
 		close(a.cancelled)
 		return runtime.Decision{}, ctx.Err()
@@ -371,6 +377,7 @@ func TestPermissionCancelledByClaude(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, "1")
 	h.appr.block = true
+	h.appr.started = filepath.Join(filepath.Dir(h.logPath), "transcripts", approverStartedFile)
 	end, _ := turn(t, h.open(), runtime.TurnInput{Text: "cancelperm"})
 	mustComplete(t, end, "cancelled")
 	select {
