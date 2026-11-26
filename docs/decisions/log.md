@@ -424,3 +424,28 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   `TestPermissionModeMigration`, `TestPermissionModesMatchRuntime`. Known limit: an
   absolute deny rule under a system link is matched as spelled and as resolved, not
   through every alias of its ancestors.
+
+## D-024 — ask_user: a hidden `openchef mcp ask-user` per session, one tool, long timeout
+*2026-11-26 · M4.5*
+
+- **Context:** Claude's own `AskUserQuestion` is disabled (D-006), so questions need
+  OpenChef's MCP tool; Codex and agy accept the same server. A question can wait up to
+  the queue's 15 minutes, and the CLIs give MCP tool calls about a minute by default.
+- **Options:** (a) an MCP server inside the daemon on a second socket; (b) this
+  executable's hidden `mcp ask-user --task --agent` on stdio, forwarding to the daemon
+  over the existing API (`approval/ask`).
+- **Challenge (self-review):** (a) adds a listener and a second protocol to the daemon
+  and needs a way to tell which agent is asking. (b) is a process per session, but CLIs
+  start MCP servers that way anyway, the task and agent are fixed by its arguments, and
+  each question dials the daemon afresh, so a daemon restart between questions does not
+  break it. The socket is the user's own (0600), so any local process of the user could
+  already queue a question; nothing new is exposed.
+- **Decision:** (b). The server lists only `ask_user` (every listed tool is offered to
+  the model, M1 findings); questions over 4000 characters are refused; an unanswered or
+  unreachable question returns "decide yourself and say so" as a normal result. The
+  call is withdrawn when the MCP connection closes. `MCPServer.ToolTimeout` (queue
+  timeout + 1 min) becomes `MCP_TOOL_TIMEOUT` for Claude and `tool_timeout_sec` for
+  Codex; agy has no known setting.
+- **Consequences:** `TestAskUserThroughTheDaemon` (MCP client → server → daemon queue →
+  `openchef answer` → tool result), `TestHandshakeAndToolList`, `TestAskUserAnswers`,
+  `TestAskUserUnanswered`, adapter timeout tests.

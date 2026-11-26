@@ -156,7 +156,7 @@ func (s *session) spawnOnce(ctx context.Context, resume bool, schema json.RawMes
 		Path:   s.rt.opts.Binary,
 		Args:   append(append([]string(nil), s.rt.opts.PrefixArgs...), args...),
 		Dir:    s.spec.Dir,
-		Env:    s.spec.Env,
+		Env:    processEnv(&s.spec),
 		Stderr: io.MultiWriter(s.log.LineWriter(rawlog.Stderr), stderr),
 	})
 	if err != nil {
@@ -812,4 +812,19 @@ func (t *tailBuffer) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return strings.TrimSpace(string(t.buf))
+}
+
+// processEnv is the CLI's environment: the spec's, plus the MCP tool timeout Claude
+// reads from MCP_TOOL_TIMEOUT (milliseconds) when OpenChef's server needs a longer one.
+func processEnv(spec *runtime.SessionSpec) []string {
+	if spec.AskUser == nil || spec.AskUser.ToolTimeout <= 0 {
+		return spec.Env
+	}
+	env := make([]string, 0, len(spec.Env)+1)
+	for _, kv := range spec.Env {
+		if !strings.HasPrefix(kv, "MCP_TOOL_TIMEOUT=") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "MCP_TOOL_TIMEOUT="+strconv.FormatInt(spec.AskUser.ToolTimeout.Milliseconds(), 10))
 }

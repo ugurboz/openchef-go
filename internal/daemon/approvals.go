@@ -18,6 +18,7 @@ func ApprovalMethods(svc *service.Service) map[string]Method {
 	return map[string]Method{
 		api.MethodApprovalList:   h.list,
 		api.MethodApprovalDecide: h.decide,
+		api.MethodApprovalAsk:    h.ask,
 	}
 }
 
@@ -79,4 +80,28 @@ func ServiceMethods(svc *service.Service) map[string]Method {
 	m := TaskMethods(svc)
 	maps.Copy(m, ApprovalMethods(svc))
 	return m
+}
+
+func (h approvalHandlers) ask(ctx context.Context, _ *Conn, params json.RawMessage) (any, error) {
+	p, err := decode[api.AskParams](params)
+	if err != nil {
+		return nil, err
+	}
+	id, err := taskID(p.Task)
+	if err != nil {
+		return nil, err
+	}
+	if p.Agent == "" || p.Question == "" {
+		return nil, api.RPCError(api.CodeInvalidParams, "agent and question are required")
+	}
+	a, err := h.svc.Ask(ctx, service.Request{Task: id, Agent: p.Agent, Kind: task.ApprovalQuestion,
+		Summary: p.Question, Options: p.Options})
+	if err != nil {
+		return nil, rpcErr(err)
+	}
+	res := api.AskResult{Status: string(a.Status)}
+	if a.Status == task.ApprovalAnswered {
+		res.Answer = a.Answer
+	}
+	return res, nil
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/ugurboz/openchef/internal/procs"
 )
@@ -99,6 +100,9 @@ type MCPServer struct {
 	Command string
 	Args    []string
 	Env     []string
+	// ToolTimeout is how long the CLI waits for one tool call; zero keeps the CLI's
+	// default. ask_user waits for a person, far beyond the CLIs' defaults.
+	ToolTimeout time.Duration
 }
 
 // TurnInput is one user message.

@@ -53,3 +53,29 @@ func (c *Client) Decide(ctx context.Context, p DecideParams) (task.Approval, err
 	err := c.Call(ctx, MethodApprovalDecide, p, &out)
 	return out, err
 }
+
+// MethodApprovalAsk queues an agent's question and waits for the answer (the ask_user
+// MCP server calls it). The call returns when the question is answered, expires, or the
+// connection closes (the question is then withdrawn).
+const MethodApprovalAsk = "approval/ask"
+
+// AskParams is a question for the user.
+type AskParams struct {
+	Task     string   `json:"task"`
+	Agent    string   `json:"agent"`
+	Question string   `json:"question"`
+	Options  []string `json:"options,omitempty"`
+}
+
+// AskResult is how a question was settled; Answer is empty unless it was answered.
+type AskResult struct {
+	Status string `json:"status"`
+	Answer string `json:"answer,omitempty"`
+}
+
+// Ask puts a question to the user and waits.
+func (c *Client) Ask(ctx context.Context, p AskParams) (AskResult, error) {
+	var out AskResult
+	err := c.Call(ctx, MethodApprovalAsk, p, &out)
+	return out, err
+}
