@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -35,6 +36,13 @@ type Turn struct {
 	IgnoreInterrupt bool
 	// Text is the final answer of a completed turn.
 	Text string
+	// Approve, if set, is asked of the session's Approver before Edit runs, as an
+	// agent asks before acting. A denial skips Edit; the turn still completes, with
+	// the denial message as its final text. The decision is recorded (Decisions).
+	Approve *runtime.ApprovalRequest
+	// Ask, if set, is put to the Approver as a question before Edit; the answer
+	// becomes the final text unless Text is set.
+	Ask *runtime.Question
 }
 
 // CallKind names a recorded call.
@@ -63,13 +71,14 @@ type Call struct {
 type Runtime struct {
 	name string
 
-	mu       sync.Mutex
-	script   []Turn
-	calls    []Call
-	sessions int
-	tokens   uint64
-	openErrs []error
-	live     map[string]*session
+	mu        sync.Mutex
+	script    []Turn
+	calls     []Call
+	sessions  int
+	tokens    uint64
+	openErrs  []error
+	live      map[string]*session
+	decisions []runtime.Decision
 }
 
 // New returns a fake runtime named name that plays turns in order.
@@ -163,7 +172,7 @@ func (r *Runtime) start(ctx context.Context, spec runtime.SessionSpec, id string
 	if err := spec.Spawned(ctx, procs.Identity{PID: pidBase + n, StartToken: token}); err != nil {
 		return nil, err // Spawned already wraps runtime.ErrSpawnRejected
 	}
-	s := &session{rt: r, ref: runtime.SessionRef{Runtime: r.name, ID: id}, dir: spec.Dir}
+	s := &session{rt: r, ref: runtime.SessionRef{Runtime: r.name, ID: id}, dir: spec.Dir, approver: spec.Approver}
 	r.mu.Lock()
 	r.live[id] = s
 	r.mu.Unlock()
@@ -188,9 +197,10 @@ func (r *Runtime) record(c Call) {
 }
 
 type session struct {
-	rt  *Runtime
-	ref runtime.SessionRef
-	dir string
+	rt       *Runtime
+	ref      runtime.SessionRef
+	dir      string
+	approver runtime.Approver
 
 	mu        sync.Mutex
 	closed    bool
@@ -271,6 +281,27 @@ func (s *session) outcome(ctx context.Context, t Turn, ok bool, stop <-chan stru
 		return failed(runtime.FailInterrupted, "fake: interrupted")
 	default:
 	}
+	if t.Approve != nil || t.Ask != nil {
+		askCtx, cancel := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-askCtx.Done():
+			}
+		}()
+		text, allowed, err := s.consult(askCtx, t)
+		cancel()
+		if err != nil {
+			return ctxFailure(ctx)
+		}
+		if t.Text == "" {
+			t.Text = text
+		}
+		if !allowed {
+			t.Edit = nil
+		}
+	}
 	if t.Edit != nil {
 		if err := t.Edit(s.dir); err != nil {
 			return failed(runtime.FailCrashed, "fake: edit: "+err.Error())
@@ -283,6 +314,37 @@ func (s *session) outcome(ctx context.Context, t Turn, ok bool, stop <-chan stru
 	return runtime.Event{Kind: runtime.EventTurnCompleted, At: time.Now(), Result: &runtime.TurnResult{
 		FinalText: t.Text, Duration: time.Since(start),
 	}}
+}
+
+// consult asks the turn's approval and question; it returns the text the agent would
+// end with and whether it may go on to edit.
+func (s *session) consult(ctx context.Context, t Turn) (text string, allowed bool, err error) {
+	allowed = true
+	if t.Approve != nil {
+		d, err := s.approver.Approve(ctx, *t.Approve)
+		if err != nil {
+			return "", false, fmt.Errorf("fake: approve: %w", err)
+		}
+		s.rt.mu.Lock()
+		s.rt.decisions = append(s.rt.decisions, d)
+		s.rt.mu.Unlock()
+		allowed, text = d.Allow, d.Message
+	}
+	if t.Ask != nil {
+		a, err := s.approver.Answer(ctx, *t.Ask)
+		if err != nil {
+			return "", false, fmt.Errorf("fake: answer: %w", err)
+		}
+		text = a
+	}
+	return text, allowed, nil
+}
+
+// Decisions returns the approver's decisions on scripted Approve requests, in order.
+func (r *Runtime) Decisions() []runtime.Decision {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.decisions)
 }
 
 func failed(kind runtime.FailureKind, msg string) runtime.Event {

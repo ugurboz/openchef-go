@@ -24,12 +24,32 @@ import (
 	"github.com/ugurboz/openchef/internal/task"
 )
 
-type allow struct{}
-
-func (allow) Approve(context.Context, runtime.ApprovalRequest) (runtime.Decision, error) {
-	return runtime.Allow(), nil
+// queued sends every request and question to the daemon's approval queue, like the
+// real approver does for everything but file changes.
+type queued struct {
+	svc   *service.Service
+	task  task.ID
+	agent string
 }
-func (allow) Answer(context.Context, runtime.Question) (string, error) { return "", nil }
+
+func (q queued) Approve(ctx context.Context, req runtime.ApprovalRequest) (runtime.Decision, error) {
+	a, err := q.svc.Ask(ctx, service.Request{Task: q.task, Agent: q.agent, Kind: task.ApprovalKind(req.Kind), Tool: req.Tool, Summary: req.Command})
+	if err != nil {
+		return runtime.Decision{}, err
+	}
+	if a.Status == task.ApprovalAllowed {
+		return runtime.Allow(), nil
+	}
+	return runtime.Deny("denied: " + a.Answer), nil
+}
+
+func (q queued) Answer(ctx context.Context, qu runtime.Question) (string, error) {
+	a, err := q.svc.Ask(ctx, service.Request{Task: q.task, Agent: q.agent, Kind: task.ApprovalQuestion, Summary: qu.Text, Options: qu.Options})
+	if err != nil {
+		return "", err
+	}
+	return a.Answer, nil
+}
 
 // cliEnv is a repository, a home directory and a daemon that starts on demand, with a
 // fake agent instead of real CLIs.
@@ -81,14 +101,15 @@ func (e *cliEnv) startDaemon() {
 		if err != nil {
 			return daemon.Services{}, err
 		}
-		svc, err := service.New(service.Deps{
+		var svc *service.Service
+		svc, err = service.New(service.Deps{
 			Store: db, EventDir: e.paths.Sessions,
 			NewEngine: func(sink engine.Sink) (*engine.Engine, error) {
 				return engine.New(engine.Config{
 					Store: db, Runtimes: map[string]runtime.Runtime{"claude": e.claude}, Sink: sink,
 					Router: &engine.Ordered{Agents: []engine.Agent{{Name: "opus", Runtime: "claude", Pool: "claude-max"}}},
-					SpecFor: func(*task.Task, engine.Agent) (runtime.SessionSpec, error) {
-						return runtime.SessionSpec{Approver: allow{}}, nil
+					SpecFor: func(t *task.Task, a engine.Agent) (runtime.SessionSpec, error) {
+						return runtime.SessionSpec{Approver: queued{svc: svc, task: t.ID, agent: a.Name}}, nil
 					},
 					WorktreeRoot: e.paths.Worktrees, SessionRoot: e.paths.Sessions,
 				})
@@ -97,7 +118,7 @@ func (e *cliEnv) startDaemon() {
 		if err != nil {
 			return daemon.Services{}, err
 		}
-		return daemon.Services{Methods: daemon.TaskMethods(svc), OnStop: func(ctx context.Context) error {
+		return daemon.Services{Methods: daemon.ServiceMethods(svc), OnStop: func(ctx context.Context) error {
 			return errors.Join(svc.Stop(ctx), db.Close())
 		}}, nil
 	}}

@@ -53,8 +53,12 @@ func (r *renderer) event(ev *engine.Event) error {
 		return nil
 	}
 	if r.quiet {
-		if ev.Kind == engine.EventTaskStatus {
+		// Quiet still shows what needs the user: the outcome and waiting requests.
+		switch ev.Kind { //nolint:exhaustive // every other kind is progress, which quiet hides
+		case engine.EventTaskStatus:
 			r.status(ev)
+		case engine.EventApprovalRequested:
+			r.approval("requested", ev.Approval)
 		}
 		return r.err
 	}
@@ -89,6 +93,10 @@ func (r *renderer) event(ev *engine.Event) error {
 		}
 	case engine.EventNotice:
 		r.printf("  · %s", ev.Message)
+	case engine.EventApprovalRequested:
+		r.approval("requested", ev.Approval)
+	case engine.EventApprovalDecided:
+		r.approval("decided", ev.Approval)
 	}
 	return r.err
 }

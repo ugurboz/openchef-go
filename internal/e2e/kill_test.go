@@ -92,7 +92,7 @@ func daemonMain(home, flag string) error {
 			if err := svc.Start(ctx); err != nil {
 				return daemon.Services{}, err
 			}
-			return daemon.Services{Methods: daemon.TaskMethods(svc), OnStop: func(ctx context.Context) error {
+			return daemon.Services{Methods: daemon.ServiceMethods(svc), OnStop: func(ctx context.Context) error {
 				if err := svc.Stop(ctx); err != nil {
 					return err // as app.Daemon: never close the store under runs still stopping
 				}

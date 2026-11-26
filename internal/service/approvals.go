@@ -14,8 +14,21 @@ import (
 )
 
 // ErrApprovalSettled means a request was already settled (by the user, a timeout or the
-// daemon) when another decision arrived.
+// daemon) when another decision arrived. Errors matching it are *SettledError.
 var ErrApprovalSettled = errors.New("service: request already settled")
+
+// SettledError says how a request was settled before a later decision arrived.
+type SettledError struct {
+	ID     int64
+	Status task.ApprovalStatus
+}
+
+func (e *SettledError) Error() string {
+	return fmt.Sprintf("request %d was already %s", e.ID, e.Status)
+}
+
+// Is reports whether target is ErrApprovalSettled.
+func (e *SettledError) Is(target error) bool { return target == ErrApprovalSettled }
 
 // restartReason settles requests left pending by a previous daemon (D-022).
 const restartReason = "The daemon restarted while this request was waiting; the agent asks again if it still needs it."
@@ -91,7 +104,7 @@ func (s *Service) Ask(ctx context.Context, req Request) (task.Approval, error) {
 		return task.Approval{}, err
 	}
 	if settle.Status == task.ApprovalWithdrawn {
-		return got, ctx.Err()
+		return got, fmt.Errorf("service: request %d withdrawn: %w", got.ID, ctx.Err())
 	}
 	return got, nil
 }
@@ -108,7 +121,7 @@ func (s *Service) decide(ctx context.Context, id int64, d task.Decision) (task.A
 	var ce *store.ConflictError
 	switch {
 	case errors.As(err, &ce):
-		return task.Approval{}, fmt.Errorf("%w: request %d was already %s", ErrApprovalSettled, id, ce.Got)
+		return task.Approval{}, &SettledError{ID: id, Status: task.ApprovalStatus(ce.Got)}
 	case errors.Is(err, task.ErrInvalid):
 		return task.Approval{}, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	case err != nil:

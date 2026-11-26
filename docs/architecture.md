@@ -726,7 +726,8 @@ JSON-RPC 2.0 over a local socket: a Unix domain socket at `~/.openchef/daemon.so
 (mode 0600) on macOS/Linux; on Windows an AF_UNIX socket in the same location with an ACL
 restricted to the current user (named pipes are the fallback if AF_UNIX proves unreliable,
 see §17). The API is versioned (`openchef.v1`) and streaming uses server notifications
-(`task/updated`, `event/appended`, `approval/requested`). The API is internal in v1; it is
+(`event/appended`, `watch/ended`; approval requests and decisions are task events,
+D-022). The API is internal in v1; it is
 documented but not promised stable.
 
 ---

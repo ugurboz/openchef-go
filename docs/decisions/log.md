@@ -360,3 +360,34 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   user's machine. A fuzz test found a parser-induced panic (`()0`), fixed and kept as a
   regression; the evaluator also recovers from panics as "ask".
 - **Consequences:** `TestBypassCorpus` (23 bypass attempts), `FuzzSplit`, mode table.
+
+## D-022 — Approval queue: durable requests, integer ids, task events, restart expiry
+*2026-11-26 · M4.3*
+
+- **Context:** §9.2 sends `ask` decisions and agent questions to one queue answerable
+  from the CLI, denied after 15 minutes. The queue must survive a daemon restart without
+  answering on behalf of an agent that is no longer waiting.
+- **Options:** (a) an in-memory queue; (b) a table (`approvals`) with compare-and-set
+  decisions and an in-memory map of waiters; for viewers, (c) a separate
+  `approval/requested` broadcast to every connection, or (d) task events on the existing
+  watch stream.
+- **Challenge (self-review):** (a) loses the audit trail and leaves `openchef approvals`
+  empty after a restart. A restarted daemon cannot hand an old answer to the agent: its
+  process was killed and the resumed turn asks again, so keeping the old row pending
+  would invite a decision that reaches no one. (c) pushes notifications to clients that
+  never read them (back-pressure on the CLI) and duplicates (d), which `run`, `logs -f`
+  and the future TUI already consume.
+- **Decision:** (b) + (d). Ids are integers (`openchef approve 3`). `Ask` blocks until
+  the user decides, the request expires (15 min → deny; a question gets "decide yourself
+  and say so"), the agent stops waiting (`withdrawn`) or the daemon stops (left pending).
+  On start, pending rows are settled `expired` by the daemon and stay listed. Requests
+  and decisions are `approval_requested` / `approval_decided` task events; `--quiet`
+  still shows requests. Summaries are stored and shown whole, multi-line commands
+  included: people approve exactly what runs. An unwatched request raises a desktop
+  notification (osascript / notify-send, arguments never through a shell; none on
+  Windows). Until M4.4 wires the evaluator, file changes are still decided by the
+  worktree rule of D-020 and everything else goes to the queue.
+- **Consequences:** `TestApprovalRoundTrip`, `TestDenyAndAnswer` (through the daemon and
+  CLI), `TestAskTimesOut`, `TestAskWithdrawnWhenAgentStops`,
+  `TestRestartExpiresPendingRequests`, `TestDecideApprovalRace`. D-020's "no shell" now
+  means "no shell without the user's approval".

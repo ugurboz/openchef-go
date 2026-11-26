@@ -56,8 +56,9 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 	cool := &cooldowns{until: map[string]time.Time{}, now: time.Now}
 	router := &engine.Ordered{Agents: Agents(cfg), Cooldown: cool.get}
 	env := os.Environ()
-	svc, err := service.New(service.Deps{
-		Store: db, EventDir: paths.Sessions, Log: log,
+	queue := &lateQueue{}
+	svc, err := service.New(service.Deps{ //nolint:contextcheck // notifications are fire-and-forget with their own timeout
+		Store: db, EventDir: paths.Sessions, Log: log, Notify: desktopNotifier(log),
 		NewEngine: func(sink engine.Sink) (*engine.Engine, error) {
 			return engine.New(engine.Config{
 				Store: db, Runtimes: runtimes, Router: router, Sink: sink,
@@ -66,7 +67,7 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 						Mode:      runtime.ModeAcceptEdits,
 						DenyRules: runtime.InvariantDenyRules,
 						Env:       sessionEnv(env, cfg.Pools[a.Pool]),
-						Approver:  workspaceApprover{dir: t.Worktree},
+						Approver:  approver{queue: queue, task: t.ID, agent: a.Name, dir: t.Worktree},
 					}, nil
 				},
 				VerifyEnv:     verify.MinimalEnv(env),
@@ -79,11 +80,12 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 	if err != nil {
 		return daemon.Services{}, errors.Join(err, db.Close())
 	}
+	queue.svc = svc // before Start: no session runs until then
 	if err := svc.Start(ctx); err != nil {
 		return daemon.Services{}, errors.Join(err, db.Close())
 	}
 	return daemon.Services{
-		Methods: daemon.TaskMethods(svc),
+		Methods: daemon.ServiceMethods(svc),
 		OnStop: func(ctx context.Context) error {
 			if err := svc.Stop(ctx); err != nil {
 				// Runs that did not stop still use the store; the process is exiting,
