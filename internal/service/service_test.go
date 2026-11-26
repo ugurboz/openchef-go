@@ -62,7 +62,12 @@ func newEnv(t *testing.T) *env {
 // service builds a service over the env's store and fakes (a new one per "daemon").
 func (e *env) service() *Service {
 	e.t.Helper()
-	s, err := New(Deps{
+	return e.serviceWith(func(*Deps) {})
+}
+
+func (e *env) serviceWith(tweak func(*Deps)) *Service {
+	e.t.Helper()
+	d := Deps{
 		Store:    e.db,
 		EventDir: filepath.Join(e.dir, "sessions"),
 		NewEngine: func(sink engine.Sink) (*engine.Engine, error) {
@@ -82,7 +87,9 @@ func (e *env) service() *Service {
 				Sleep:        func(context.Context, time.Duration) error { return nil },
 			})
 		},
-	})
+	}
+	tweak(&d)
+	s, err := New(d)
 	if err != nil {
 		e.t.Fatal(err)
 	}

@@ -6,13 +6,28 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ugurboz/openchef/internal/config"
 	"github.com/ugurboz/openchef/internal/runtime"
+	"github.com/ugurboz/openchef/internal/service"
+	"github.com/ugurboz/openchef/internal/task"
 )
 
-func TestWorkspaceApprover(t *testing.T) {
+// fakeQueue answers every request with its status/answer and records what it was asked.
+type fakeQueue struct {
+	status task.ApprovalStatus
+	answer string
+	asked  []service.Request
+}
+
+func (q *fakeQueue) Ask(_ context.Context, req service.Request) (task.Approval, error) {
+	q.asked = append(q.asked, req)
+	return task.Approval{Kind: req.Kind, Status: q.status, Answer: q.answer}, nil
+}
+
+func TestApproverFileChanges(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -23,14 +38,13 @@ func TestWorkspaceApprover(t *testing.T) {
 	if err := os.Symlink(dir, filepath.Join(ws, "escape")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	a := workspaceApprover{dir: ws}
+	q := &fakeQueue{status: task.ApprovalAllowed}
+	a := approver{queue: q, task: "t", agent: "opus", dir: ws}
 	edit := func(paths ...string) runtime.ApprovalRequest {
 		return runtime.ApprovalRequest{Kind: runtime.ApproveFileChange, Tool: "Edit", Paths: paths}
 	}
 	allowed := []runtime.ApprovalRequest{edit(filepath.Join(ws, "main.go")), edit("rel/new.go")}
 	denied := []runtime.ApprovalRequest{
-		{Kind: runtime.ApproveCommand, Tool: "Bash", Command: "go test ./..."},
-		{Kind: runtime.ApproveTool, Tool: "WebFetch"},
 		edit(),
 		edit(filepath.Join(dir, "outside.txt")),
 		edit(filepath.Join(ws, "escape", "outside.txt")),
@@ -50,8 +64,45 @@ func TestWorkspaceApprover(t *testing.T) {
 			t.Errorf("%+v allowed: %+v %v", r, d, err)
 		}
 	}
-	if d, _ := (workspaceApprover{}).Approve(ctx, edit("x.go")); d.Allow {
+	if len(q.asked) != 0 {
+		t.Errorf("file changes went to the user: %+v", q.asked)
+	}
+	if d, _ := (approver{queue: q}).Approve(ctx, edit("x.go")); d.Allow {
 		t.Error("no workspace allowed a relative write")
+	}
+}
+
+func TestApproverAsksTheUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cmd := runtime.ApprovalRequest{Kind: runtime.ApproveCommand, Tool: "Bash", Command: "go test ./...\nrm -rf /tmp/x"}
+	for _, tc := range []struct {
+		status task.ApprovalStatus
+		answer string
+		allow  bool
+		msg    string
+	}{
+		{task.ApprovalAllowed, "", true, ""},
+		{task.ApprovalDenied, "use make test", false, "They said: use make test"},
+		{task.ApprovalExpired, "No one answered within 15m0s.", false, "No one answered"},
+	} {
+		q := &fakeQueue{status: tc.status, answer: tc.answer}
+		d, err := approver{queue: q, task: "t", agent: "opus", dir: t.TempDir()}.Approve(ctx, cmd)
+		if err != nil || d.Allow != tc.allow || !strings.Contains(d.Message, tc.msg) {
+			t.Errorf("%s: %+v, %v", tc.status, d, err)
+		}
+		if len(q.asked) != 1 || q.asked[0].Summary != cmd.Command || q.asked[0].Kind != task.ApprovalCommand || q.asked[0].Agent != "opus" {
+			t.Errorf("asked %+v", q.asked)
+		}
+	}
+	q := &fakeQueue{status: task.ApprovalAnswered, answer: "8080"}
+	got, err := approver{queue: q}.Answer(ctx, runtime.Question{Text: "Which port?", Options: []string{"8080"}})
+	if err != nil || got != "8080" || q.asked[0].Kind != task.ApprovalQuestion {
+		t.Fatalf("answer %q, %v, %+v", got, err, q.asked)
+	}
+	q = &fakeQueue{status: task.ApprovalExpired}
+	if got, _ := (approver{queue: q}).Answer(ctx, runtime.Question{Text: "?"}); got != unansweredQuestion {
+		t.Fatalf("expired question answered %q", got)
 	}
 }
 

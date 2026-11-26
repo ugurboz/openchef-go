@@ -209,6 +209,14 @@ func (e *events) Subscribe(id task.ID, replay bool) ([]engine.Event, *Subscripti
 	return past, sub, nil
 }
 
+// watched reports whether anyone is watching the task live.
+func (e *events) watched(id task.ID) bool {
+	l := e.log(id)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.subs) > 0
+}
+
 // Unsubscribe ends sub.
 func (e *events) Unsubscribe(id task.ID, sub *Subscription) {
 	l := e.log(id)
