@@ -22,6 +22,10 @@ const (
 	EventAttemptEnded   EventKind = "attempt_ended"   // Status (attempt status), Message (outcome)
 	EventStepFinished   EventKind = "step_finished"   // Status (step status), Message (commit)
 	EventNotice         EventKind = "notice"          // Message: retries, backoff, failover, nudges
+
+	// Published by the service's approval queue (§9.2), not by the engine.
+	EventApprovalRequested EventKind = "approval_requested" // Agent, Approval
+	EventApprovalDecided   EventKind = "approval_decided"   // Agent, Approval
 )
 
 // Event is one observable thing the engine did, streamed live to `run`, `logs -f` and
@@ -36,8 +40,9 @@ type Event struct {
 	Status  string    `json:"status,omitempty"`
 	Message string    `json:"message,omitempty"`
 
-	Runtime *runtime.Event `json:"runtime,omitempty"`
-	Verify  *verify.Result `json:"verify,omitempty"`
+	Runtime  *runtime.Event `json:"runtime,omitempty"`
+	Verify   *verify.Result `json:"verify,omitempty"`
+	Approval *task.Approval `json:"approval,omitempty"`
 }
 
 // Sink receives engine events. Publish must not block: the engine calls it from the

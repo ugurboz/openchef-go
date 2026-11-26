@@ -36,6 +36,11 @@ type Deps struct {
 	EventDir string
 	Log      *slog.Logger
 	Now      func() time.Time
+	// Notify shows a desktop notification (best effort) for a request nobody is
+	// watching; nil disables notifications.
+	Notify func(title, body string)
+	// ApprovalTimeout overrides task.ApprovalTimeout (tests).
+	ApprovalTimeout time.Duration
 }
 
 // Service runs tasks. Methods are safe for concurrent use.
@@ -45,6 +50,10 @@ type Service struct {
 	events *events
 	log    *slog.Logger
 	now    func() time.Time
+	notify func(title, body string)
+	queue  approvals
+	// approvalTimeout is how long a request waits for the user.
+	approvalTimeout time.Duration
 
 	life   context.Context //nolint:containedctx // the service's lifetime: Stop cancels every task
 	cancel context.CancelFunc
@@ -69,7 +78,12 @@ func New(d Deps) (*Service, error) {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Service{db: d.Store, log: log, now: now, running: map[task.ID]context.CancelFunc{}, timers: map[task.ID]*time.Timer{}}
+	s := &Service{db: d.Store, log: log, now: now, notify: d.Notify, queue: approvals{waiting: map[int64]chan task.Approval{}},
+		running: map[task.ID]context.CancelFunc{}, timers: map[task.ID]*time.Timer{}}
+	s.approvalTimeout = d.ApprovalTimeout
+	if s.approvalTimeout <= 0 {
+		s.approvalTimeout = task.ApprovalTimeout
+	}
 	s.events = newEvents(d.EventDir, func(err error) { log.Error("event log", "err", err) })
 	eng, err := d.NewEngine(s.events)
 	if err != nil {
@@ -81,7 +95,8 @@ func New(d Deps) (*Service, error) {
 }
 
 // Start recovers after a daemon restart (§5.3): it kills processes left by the previous
-// daemon, resumes running tasks and schedules waiting_quota ones.
+// daemon, expires the requests they were waiting on, resumes running tasks and
+// schedules waiting_quota ones.
 func (s *Service) Start(ctx context.Context) error {
 	killed, err := s.eng.KillLeftovers(ctx)
 	if err != nil {
@@ -89,6 +104,9 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	if killed > 0 {
 		s.log.Warn("killed processes left by a previous daemon", "count", killed)
+	}
+	if err := s.expireStale(ctx); err != nil {
+		return err
 	}
 	active, err := s.db.Tasks(ctx, store.TaskFilter{Active: true})
 	if err != nil {
