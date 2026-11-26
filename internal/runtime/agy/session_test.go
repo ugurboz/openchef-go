@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -159,7 +160,10 @@ func (h *harness) answers() []string {
 	return out
 }
 
-var drainTimeout = 15 * time.Second
+// drainTimeout is generous because the stress job runs three adapter packages at once
+// under -race on small runners; if it ever fires, drain dumps every goroutine so a real
+// hang can be told apart from a starved machine.
+var drainTimeout = 45 * time.Second
 
 func drain(t *testing.T, ch <-chan runtime.Event) []runtime.Event {
 	t.Helper()
@@ -173,7 +177,9 @@ func drain(t *testing.T, ch <-chan runtime.Event) []runtime.Event {
 			}
 			evs = append(evs, ev)
 		case <-timeout:
-			t.Fatalf("turn did not finish; events: %+v", evs)
+			buf := make([]byte, 1<<20)
+			n := goruntime.Stack(buf, true)
+			t.Fatalf("turn did not finish after %s; %d events: %+v\n\ngoroutines:\n%s", drainTimeout, len(evs), evs, buf[:n])
 		}
 	}
 }

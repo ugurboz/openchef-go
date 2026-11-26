@@ -119,6 +119,9 @@ func (s *session) start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("agy: start: %w", err)
 	}
+	if err := s.spec.Spawned(ctx, p.Identity()); err != nil {
+		return errors.Join(fmt.Errorf("agy: %w", err), p.Close(context.WithoutCancel(ctx)))
+	}
 	g := &proc{p: p, stderr: stderr, routed: make(chan struct{})}
 	g.peer = linerpc.New(p.Stdout, p.Stdin, linerpc.Options{
 		Log: s.log,

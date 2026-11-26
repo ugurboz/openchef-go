@@ -86,10 +86,15 @@ func runFake(scenario string) int {
 				ch <- m.Result
 			}
 		case m.Method == "session/cancel":
+			// The channel stays in place once closed: the prompt goroutine may reach
+			// waitCancel only after the cancel arrived (it did under stress load).
 			f.mu.Lock()
 			if f.cancel != nil {
-				close(f.cancel)
-				f.cancel = nil
+				select {
+				case <-f.cancel:
+				default:
+					close(f.cancel)
+				}
 			}
 			f.mu.Unlock()
 		case len(m.ID) > 0:
