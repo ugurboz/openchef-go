@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -277,8 +278,23 @@ func TestWaitingQuotaWakesUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.waitStatus(tk.ID, task.StatusWaitingQuota)
+	// The wait can be shorter than one poll on a loaded machine, so the event log, not
+	// the current status, proves the task waited.
 	e.waitStatus(tk.ID, task.StatusDone)
+	past, sub, err := s.Watch(ctx, tk.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Unwatch(tk.ID, sub)
+	var statuses []string
+	for _, ev := range past {
+		if ev.Kind == engine.EventTaskStatus {
+			statuses = append(statuses, ev.Status)
+		}
+	}
+	if !slices.Contains(statuses, string(task.StatusWaitingQuota)) {
+		t.Fatalf("task statuses %v: never waited for quota", statuses)
+	}
 }
 
 // A daemon restart: the new service kills leftovers and resumes the running task.
