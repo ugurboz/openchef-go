@@ -56,6 +56,17 @@ func Check(workspace, p string) (string, error) {
 	if workspace == "" || !filepath.IsAbs(workspace) {
 		return "no workspace is known, so no file may be changed", nil
 	}
+	// Names first, on the path as given: a Windows alias of .git (".git::$INDEX_ALLOCATION")
+	// may not even resolve, and must be refused for what it names, not for an I/O error.
+	lexical := p
+	if !filepath.IsAbs(lexical) {
+		lexical = filepath.Join(workspace, lexical)
+	}
+	if rel, ok := within(filepath.Clean(workspace), filepath.Clean(lexical)); ok {
+		if why := protectedIn(rel, p); why != "" {
+			return why, nil
+		}
+	}
 	root, err := Resolve("", workspace)
 	if err != nil {
 		return "", err
@@ -68,12 +79,18 @@ func Check(workspace, p string) (string, error) {
 	if !ok {
 		return "only files inside the task's workspace may be changed: " + p, nil
 	}
+	return protectedIn(rel, p), nil
+}
+
+// protectedIn explains why rel (relative to the workspace) is under a protected
+// directory, or returns "".
+func protectedIn(rel, p string) string {
 	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
 		if name, bad := protected(part); bad {
-			return "files under " + name + " are managed by OpenChef and may not be changed: " + p, nil
+			return "files under " + name + " are managed by OpenChef and may not be changed: " + p
 		}
 	}
-	return "", nil
+	return ""
 }
 
 // within reports whether p is root or below it, and the relative path.
