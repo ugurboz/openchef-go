@@ -202,6 +202,11 @@ func (f *fake) onInterrupt(id string) {
 
 // permission sends can_use_tool and waits for the host's decision.
 func (f *fake) permission(id, tool string, input map[string]any) json.RawMessage {
+	return f.permissionSent(id, tool, input, nil)
+}
+
+// permissionSent is permission that closes sent once the request has been written.
+func (f *fake) permissionSent(id, tool string, input map[string]any, sent chan<- struct{}) json.RawMessage {
 	ch := make(chan json.RawMessage, 1)
 	f.mu.Lock()
 	f.replies[id] = ch
@@ -210,6 +215,9 @@ func (f *fake) permission(id, tool string, input map[string]any) json.RawMessage
 		"subtype": "can_use_tool", "tool_name": tool, "input": input, "tool_use_id": "tu-" + id,
 		"description": "fake request", "blocked_path": "/work/x.txt",
 	}})
+	if sent != nil {
+		close(sent)
+	}
 	select {
 	case r := <-ch:
 		return r
@@ -337,7 +345,12 @@ func (f *fake) fakeTurn(text string) {
 		}
 		f.result("success", false, "decided "+d.Behavior, map[string]any{"permission_denials": denials})
 	case "cancelperm":
-		go f.permission("perm-2", "Bash", map[string]any{"command": "sleep 100"})
+		// The request must be on the wire before the cancel; a goroutine scheduled late
+		// under stress load once sent it after the cancel, which the adapter rightly
+		// ignored.
+		sent := make(chan struct{})
+		go f.permissionSent("perm-2", "Bash", map[string]any{"command": "sleep 100"}, sent)
+		<-sent
 		time.Sleep(200 * time.Millisecond)
 		f.send(map[string]any{"type": "control_cancel_request", "request_id": "perm-2"})
 		time.Sleep(200 * time.Millisecond)
