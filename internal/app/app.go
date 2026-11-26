@@ -57,17 +57,27 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 	router := &engine.Ordered{Agents: Agents(cfg), Cooldown: cool.get}
 	env := os.Environ()
 	queue := &lateQueue{}
+	pols, err := newPolicies(paths)
+	if err != nil {
+		return daemon.Services{}, errors.Join(err, db.Close())
+	}
 	svc, err := service.New(service.Deps{ //nolint:contextcheck // notifications are fire-and-forget with their own timeout
 		Store: db, EventDir: paths.Sessions, Log: log, Notify: desktopNotifier(log),
+		DefaultPermissions: pols.defaultMode,
 		NewEngine: func(sink engine.Sink) (*engine.Engine, error) {
 			return engine.New(engine.Config{
 				Store: db, Runtimes: runtimes, Router: router, Sink: sink,
 				SpecFor: func(t *task.Task, a engine.Agent) (runtime.SessionSpec, error) {
+					ps, err := pols.session(t)
+					if err != nil {
+						return runtime.SessionSpec{}, err
+					}
 					return runtime.SessionSpec{
-						Mode:      runtime.ModeAcceptEdits,
-						DenyRules: runtime.InvariantDenyRules,
+						Mode:      ps.mode,
+						DenyRules: ps.denyRules,
+						AskRules:  ps.askRules,
 						Env:       sessionEnv(env, cfg.Pools[a.Pool]),
-						Approver:  approver{queue: queue, task: t.ID, agent: a.Name, dir: t.Worktree},
+						Approver:  approver{queue: queue, eval: ps.eval, task: t.ID, agent: a.Name},
 					}, nil
 				},
 				VerifyEnv:     verify.MinimalEnv(env),

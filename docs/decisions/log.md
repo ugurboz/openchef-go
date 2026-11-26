@@ -391,3 +391,36 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   CLI), `TestAskTimesOut`, `TestAskWithdrawnWhenAgentStops`,
   `TestRestartExpiresPendingRequests`, `TestDecideApprovalRace`. D-020's "no shell" now
   means "no shell without the user's approval".
+
+## D-023 — Per-task permission mode; evaluator before the queue; links judged where they lead
+*2026-11-26 · M4.4*
+
+- **Context:** §9.3 maps six modes onto three runtimes; D-020's fixed policy
+  (acceptEdits, worktree-only edits) and the M4.1 evaluator had to meet. The evaluator
+  also compared paths lexically.
+- **Options:** mode per daemon, per repository (settings only) or per task; for links,
+  lexical matching, fully resolved matching, or resolved matching only for paths that
+  leave the workspace through a link inside it.
+- **Challenge (self-review):** a per-repository mode cannot express "this one task in
+  plan mode". Fully resolved matching breaks users' absolute rules on macOS
+  (`/etc` → `/private/etc`, `/var` → `/private/var`); lexical matching lets
+  `src/out -> /` turn `Read(src/**)` into a read of anything. A bypass that a settings
+  file can switch on for every task is one committed line away from running every
+  command unasked.
+- **Decision:** the mode is stored on the task (`permission_mode`, migration 0004; older
+  rows are `acceptEdits`, the policy they ran under), chosen by `run --permission-mode`
+  or the merged settings' `defaultMode`, else `manual`. `bypassPermissions` is accepted
+  only when asked for per task and only in an isolated worktree; as a default it is
+  refused. Each session loads the settings again and builds an evaluator for its
+  worktree; private paths are OpenChef's home except `worktrees/`. The approver asks the
+  evaluator first: allow and deny are answered at once, ask goes to the queue (D-022);
+  mode changes (ExitPlanMode) always go to the user. Deny and ask rules are also passed
+  natively (Claude), after the invariants. Paths that leave the workspace through a link
+  inside it are judged where they lead; deny rules match both spellings; write
+  invariants use pathguard (case, Windows aliases).
+- **Consequences:** D-020's approver is gone. `TestApproverModeMatrix` (every mode ×
+  Claude/Codex/agy request shapes, out-of-workspace writes denied in all),
+  `TestSymlinkedPaths`, `TestSessionPolicy`, `TestRunPermissionMode`,
+  `TestPermissionModeMigration`, `TestPermissionModesMatchRuntime`. Known limit: an
+  absolute deny rule under a system link is matched as spelled and as resolved, not
+  through every alias of its ancestors.

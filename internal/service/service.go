@@ -41,6 +41,9 @@ type Deps struct {
 	Notify func(title, body string)
 	// ApprovalTimeout overrides task.ApprovalTimeout (tests).
 	ApprovalTimeout time.Duration
+	// DefaultPermissions returns a repository's default permission mode (its settings'
+	// defaultMode); nil means manual.
+	DefaultPermissions func(repoRoot string) (task.PermissionMode, error)
 }
 
 // Service runs tasks. Methods are safe for concurrent use.
@@ -53,7 +56,8 @@ type Service struct {
 	notify func(title, body string)
 	queue  approvals
 	// approvalTimeout is how long a request waits for the user.
-	approvalTimeout time.Duration
+	approvalTimeout    time.Duration
+	defaultPermissions func(repoRoot string) (task.PermissionMode, error)
 
 	life   context.Context //nolint:containedctx // the service's lifetime: Stop cancels every task
 	cancel context.CancelFunc
@@ -80,6 +84,7 @@ func New(d Deps) (*Service, error) {
 	}
 	s := &Service{db: d.Store, log: log, now: now, notify: d.Notify, queue: approvals{waiting: map[int64]chan task.Approval{}},
 		running: map[task.ID]context.CancelFunc{}, timers: map[task.ID]*time.Timer{}}
+	s.defaultPermissions = d.DefaultPermissions
 	s.approvalTimeout = d.ApprovalTimeout
 	if s.approvalTimeout <= 0 {
 		s.approvalTimeout = task.ApprovalTimeout
@@ -160,6 +165,31 @@ type RunRequest struct {
 	// Agent pins an agent; empty lets the router choose.
 	Agent      string
 	Importance task.Importance
+	// Permissions is the task's permission mode; empty uses the repository's
+	// configured default (Deps.DefaultPermissions). bypassPermissions is accepted only
+	// here, asked for per task, never as a default (§9.3).
+	Permissions task.PermissionMode
+}
+
+// permissions resolves a new task's permission mode.
+func (s *Service) permissions(repoRoot string, asked task.PermissionMode) (task.PermissionMode, error) {
+	if asked != "" {
+		if !asked.Valid() {
+			return "", fmt.Errorf("%w: unknown permission mode %q", ErrInvalidRequest, asked)
+		}
+		return asked, nil
+	}
+	if s.defaultPermissions == nil {
+		return task.PermissionsManual, nil
+	}
+	m, err := s.defaultPermissions(repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+	}
+	if m == task.PermissionsBypassPermissions {
+		return "", fmt.Errorf("%w: bypassPermissions cannot be a default; ask for it per task with --permission-mode", ErrInvalidRequest)
+	}
+	return m, nil
 }
 
 // Run creates a run task and starts it.
@@ -180,9 +210,14 @@ func (s *Service) Run(ctx context.Context, req RunRequest) (task.Task, error) {
 	if err != nil {
 		return task.Task{}, fmt.Errorf("service: %w", err)
 	}
+	perms, err := s.permissions(repo.Root, req.Permissions)
+	if err != nil {
+		return task.Task{}, err
+	}
 	t := task.Task{
 		ID: id, Kind: task.KindRun, Status: task.StatusRunning, Prompt: prompt, RepoRoot: repo.Root,
 		Mode: task.ModeIsolated, Backend: task.BackendLocal, Importance: importance, AgentPin: req.Agent,
+		Permissions: perms,
 	}
 	steps := []task.Step{{
 		Index: 1, Title: title(prompt), Prompt: prompt, Verify: strings.TrimSpace(req.Verify),

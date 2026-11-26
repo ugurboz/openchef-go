@@ -38,6 +38,8 @@ type RunParams struct {
 	Dir    string `json:"dir"`
 	Verify string `json:"verify,omitempty"`
 	Agent  string `json:"agent,omitempty"`
+	// PermissionMode overrides the repository's default mode for this task.
+	PermissionMode string `json:"permissionMode,omitempty"`
 }
 
 // TaskParams names a task.
@@ -77,19 +79,21 @@ type WatchEnded struct {
 
 // Task is the wire form of task.Task.
 type Task struct {
-	ID         string    `json:"id"`
-	Kind       string    `json:"kind"`
-	Status     string    `json:"status"`
-	Prompt     string    `json:"prompt"`
-	Repo       string    `json:"repo"`
-	Branch     string    `json:"branch,omitempty"`
-	Worktree   string    `json:"worktree,omitempty"`
-	BaseCommit string    `json:"baseCommit,omitempty"`
-	Agent      string    `json:"agent,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
-	ResumeAt   time.Time `json:"resumeAt,omitzero"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	Status     string `json:"status"`
+	Prompt     string `json:"prompt"`
+	Repo       string `json:"repo"`
+	Branch     string `json:"branch,omitempty"`
+	Worktree   string `json:"worktree,omitempty"`
+	BaseCommit string `json:"baseCommit,omitempty"`
+	Agent      string `json:"agent,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	// PermissionMode is the task's permission mode (§9.1).
+	PermissionMode string    `json:"permissionMode"`
+	ResumeAt       time.Time `json:"resumeAt,omitzero"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // Step is the wire form of task.Step.
@@ -127,7 +131,7 @@ func FromTask(t *task.Task) Task {
 	return Task{
 		ID: string(t.ID), Kind: string(t.Kind), Status: string(t.Status), Prompt: t.Prompt,
 		Repo: t.RepoRoot, Branch: t.Branch, Worktree: t.Worktree, BaseCommit: t.BaseCommit,
-		Agent: t.AgentPin, Reason: t.Reason, ResumeAt: t.ResumeAt, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+		Agent: t.AgentPin, Reason: t.Reason, PermissionMode: string(t.Permissions), ResumeAt: t.ResumeAt, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
 	}
 }
 

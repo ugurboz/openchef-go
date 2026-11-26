@@ -17,6 +17,7 @@ import (
 	"github.com/ugurboz/openchef/internal/config"
 	"github.com/ugurboz/openchef/internal/daemon"
 	"github.com/ugurboz/openchef/internal/engine"
+	"github.com/ugurboz/openchef/internal/runtime"
 	"github.com/ugurboz/openchef/internal/runtime/linerpc"
 	"github.com/ugurboz/openchef/internal/task"
 )
@@ -60,8 +61,8 @@ var errTaskUnsuccessful = &ExitError{Code: 1}
 
 func newRunCommand(deps Deps) *cobra.Command {
 	var (
-		verifyCmd, agent      string
-		quiet, detach, asJSON bool
+		verifyCmd, agent, mode string
+		quiet, detach, asJSON  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run <prompt>",
@@ -82,7 +83,14 @@ func newRunCommand(deps Deps) *cobra.Command {
 				return err
 			}
 			defer func() { _ = c.Close() }()
-			t, err := c.Run(ctx, api.RunParams{Prompt: strings.Join(args, " "), Dir: dir, Verify: verifyCmd, Agent: agent})
+			if mode != "" {
+				m, err := runtime.ParseMode(mode)
+				if err != nil {
+					return err
+				}
+				mode = string(m)
+			}
+			t, err := c.Run(ctx, api.RunParams{Prompt: strings.Join(args, " "), Dir: dir, Verify: verifyCmd, Agent: agent, PermissionMode: mode})
 			if err != nil {
 				return friendly(err)
 			}
@@ -100,6 +108,8 @@ func newRunCommand(deps Deps) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&verifyCmd, "verify", "", "command that must pass in the workspace, e.g. \"go test ./...\"")
 	cmd.Flags().StringVar(&agent, "agent", "", "pin an agent from config.toml instead of routing")
+	cmd.Flags().StringVar(&mode, "permission-mode", "",
+		"manual, acceptEdits, plan, auto, dontAsk or bypassPermissions (default: settings.toml defaultMode, else manual)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "print only the final result")
 	cmd.Flags().BoolVar(&detach, "detach", false, "return immediately; follow with `openchef logs <task> -f`")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print events as JSON lines")
@@ -281,7 +291,7 @@ func printDetail(w interface{ Write([]byte) (int, error) }, d *api.TaskDetail) e
 	if !t.ResumeAt.IsZero() {
 		fmt.Fprintf(&b, " (resumes %s)", t.ResumeAt.Local().Format("15:04 Jan 2"))
 	}
-	fmt.Fprintf(&b, "\nrepo     %s\n", t.Repo)
+	fmt.Fprintf(&b, "\nrepo     %s\nmode     %s\n", t.Repo, t.PermissionMode)
 	if t.Branch != "" {
 		fmt.Fprintf(&b, "branch   %s\nworktree %s\n", t.Branch, t.Worktree)
 	}

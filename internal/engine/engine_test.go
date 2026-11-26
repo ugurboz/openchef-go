@@ -428,7 +428,7 @@ func TestPinnedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk := task.Task{ID: id, Kind: task.KindRun, Status: task.StatusRunning, Prompt: "p", RepoRoot: h.repo,
-		Mode: task.ModeIsolated, Backend: task.BackendLocal, Importance: task.ImportanceNormal, AgentPin: "gpt"}
+		Mode: task.ModeIsolated, Backend: task.BackendLocal, Importance: task.ImportanceNormal, AgentPin: "gpt", Permissions: task.PermissionsAcceptEdits}
 	if err := h.db.CreateTask(context.Background(), &tk, []task.Step{{Index: 1, Title: "t", Prompt: "p",
 		Verify: h.verify, Importance: task.ImportanceNormal, Status: task.StepPending}}); err != nil {
 		t.Fatal(err)

@@ -337,3 +337,32 @@ func TestTitle(t *testing.T) {
 		t.Errorf("title = %q", got)
 	}
 }
+
+func TestRunPermissionMode(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e := newEnv(t)
+	def := task.PermissionsAcceptEdits
+	s := e.serviceWith(func(d *Deps) {
+		d.DefaultPermissions = func(string) (task.PermissionMode, error) { return def, nil }
+	})
+	defer stop(t, s)
+	e.claude.Push(fake.Turn{Edit: writeFile}, fake.Turn{Edit: writeFile})
+	tk, err := s.Run(ctx, RunRequest{Prompt: "p", Dir: e.repo})
+	if err != nil || tk.Permissions != task.PermissionsAcceptEdits {
+		t.Fatalf("default: %+v, %v", tk, err)
+	}
+	e.waitStatus(tk.ID, task.StatusDone)
+	tk, err = s.Run(ctx, RunRequest{Prompt: "p", Dir: e.repo, Permissions: task.PermissionsBypassPermissions})
+	if err != nil || tk.Permissions != task.PermissionsBypassPermissions {
+		t.Fatalf("explicit bypass: %+v, %v", tk, err)
+	}
+	e.waitStatus(tk.ID, task.StatusDone)
+	if _, err := s.Run(ctx, RunRequest{Prompt: "p", Dir: e.repo, Permissions: "yolo"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("unknown mode: %v", err)
+	}
+	def = task.PermissionsBypassPermissions
+	if _, err := s.Run(ctx, RunRequest{Prompt: "p", Dir: e.repo}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("bypass as a default: %v", err)
+	}
+}
