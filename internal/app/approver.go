@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ugurboz/openchef/internal/pathguard"
+	"github.com/ugurboz/openchef/internal/permissions"
 	"github.com/ugurboz/openchef/internal/runtime"
 	"github.com/ugurboz/openchef/internal/service"
 	"github.com/ugurboz/openchef/internal/task"
@@ -18,31 +18,50 @@ type asker interface {
 	Ask(ctx context.Context, req service.Request) (task.Approval, error)
 }
 
-// approver is the permission policy until the evaluator is wired in (M4.4, D-020,
-// D-022): file changes inside the task's worktree are allowed, except under the
-// invariant directories (.git, .openchef, .claude) and outside the worktree, which are
-// denied; everything else (shell commands, other tools) and every question goes to the
-// user through the approval queue.
+// approver decides one session's permission requests (§9.2): the evaluator answers
+// allow and deny at once; what needs asking, and every question, goes to the user
+// through the approval queue (D-022).
 type approver struct {
 	queue asker
+	eval  *permissions.Evaluator
 	task  task.ID
 	agent string
-	dir   string
 }
 
 const unansweredQuestion = "No one is available to answer right now. Make the most reasonable choice, " +
 	"say which one you made in your final answer, and continue."
 
 func (a approver) Approve(ctx context.Context, req runtime.ApprovalRequest) (runtime.Decision, error) {
-	if req.Kind == runtime.ApproveFileChange {
-		return a.fileChange(req), nil
+	reason := ""
+	if req.Kind != runtime.ApproveModeChange {
+		v := a.eval.Evaluate(permissionRequest(&req))
+		switch v.Decision {
+		case permissions.Allow:
+			return runtime.Allow(), nil
+		case permissions.Deny:
+			msg := "OpenChef refused this: " + v.Reason
+			if v.Rule != "" {
+				msg += " (" + v.Rule + ")"
+			}
+			return runtime.Deny(msg + "."), nil
+		case permissions.Ask:
+			reason = v.Reason
+		}
 	}
-	raw, err := json.Marshal(req)
+	return a.ask(ctx, &req, reason)
+}
+
+// ask puts a request to the user.
+func (a approver) ask(ctx context.Context, req *runtime.ApprovalRequest, reason string) (runtime.Decision, error) {
+	raw, err := json.Marshal(struct {
+		Request *runtime.ApprovalRequest `json:"request"`
+		Reason  string                   `json:"reason,omitempty"`
+	}{req, reason})
 	if err != nil {
 		return runtime.Deny("OpenChef could not record this request, so it refused it."), nil //nolint:nilerr // the agent is told; the turn goes on
 	}
 	got, err := a.queue.Ask(ctx, service.Request{Task: a.task, Agent: a.agent, Kind: kindOf(req.Kind),
-		Tool: req.Tool, Summary: summary(&req), Raw: raw})
+		Tool: req.Tool, Summary: summary(req), Raw: raw})
 	if err != nil {
 		if ctx.Err() != nil {
 			return runtime.Decision{}, fmt.Errorf("app: approval: %w", err)
@@ -63,6 +82,30 @@ func (a approver) Approve(ctx context.Context, req runtime.ApprovalRequest) (run
 	}
 }
 
+// permissionRequest is what the evaluator decides on. Tool names follow Claude Code
+// (every adapter normalizes to them); a request without one is judged by its kind.
+func permissionRequest(req *runtime.ApprovalRequest) permissions.Request {
+	tool := req.Tool
+	switch {
+	case tool == "" && req.Kind == runtime.ApproveCommand:
+		tool = "Bash"
+	case tool == "" && req.Kind == runtime.ApproveFileChange:
+		tool = "Edit"
+	}
+	out := permissions.Request{Tool: tool, Command: req.Command}
+	if tool != "Bash" {
+		out.Paths = req.Paths
+	}
+	if tool == "WebFetch" {
+		var in struct {
+			URL string `json:"url"`
+		}
+		_ = json.Unmarshal(req.Input, &in) // no URL: the evaluator asks
+		out.URL = in.URL
+	}
+	return out
+}
+
 func (a approver) Answer(ctx context.Context, q runtime.Question) (string, error) {
 	got, err := a.queue.Ask(ctx, service.Request{Task: a.task, Agent: a.agent, Kind: task.ApprovalQuestion,
 		Summary: q.Text, Options: q.Options})
@@ -73,23 +116,6 @@ func (a approver) Answer(ctx context.Context, q runtime.Question) (string, error
 		return unansweredQuestion, nil //nolint:nilerr // a question nobody can answer is not an error for the agent
 	}
 	return got.Answer, nil
-}
-
-// fileChange allows writes inside the worktree and refuses the rest with the reason.
-func (a approver) fileChange(req runtime.ApprovalRequest) runtime.Decision {
-	if len(req.Paths) == 0 {
-		return runtime.Deny("OpenChef could not tell which files this change touches, so it refused it.")
-	}
-	for _, p := range req.Paths {
-		why, err := pathguard.Check(a.dir, p)
-		if err != nil {
-			return runtime.Deny("OpenChef could not check this path, so it refused the change: " + err.Error())
-		}
-		if why != "" {
-			return runtime.Deny(strings.ToUpper(why[:1]) + why[1:] + ".")
-		}
-	}
-	return runtime.Allow()
 }
 
 func kindOf(k runtime.ApprovalKind) task.ApprovalKind {

@@ -80,7 +80,8 @@ func (h *taskHandlers) run(ctx context.Context, _ *Conn, params json.RawMessage)
 	if !filepath.IsAbs(p.Dir) {
 		return nil, api.RPCError(api.CodeInvalidParams, "dir must be an absolute path")
 	}
-	t, err := h.svc.Run(ctx, service.RunRequest{Prompt: p.Prompt, Dir: p.Dir, Verify: p.Verify, Agent: p.Agent})
+	t, err := h.svc.Run(ctx, service.RunRequest{Prompt: p.Prompt, Dir: p.Dir, Verify: p.Verify, Agent: p.Agent,
+		Permissions: task.PermissionMode(p.PermissionMode)})
 	if err != nil {
 		return nil, rpcErr(err)
 	}

@@ -201,7 +201,7 @@ func (h *harness) runTask(verifyCmd string) task.ID {
 	}
 	tk := task.Task{
 		ID: id, Kind: task.KindRun, Status: task.StatusRunning, Prompt: "create done.txt",
-		RepoRoot: h.repo, Mode: task.ModeIsolated, Backend: task.BackendLocal, Importance: task.ImportanceNormal,
+		RepoRoot: h.repo, Mode: task.ModeIsolated, Backend: task.BackendLocal, Importance: task.ImportanceNormal, Permissions: task.PermissionsAcceptEdits,
 	}
 	steps := []task.Step{{
 		Index: 1, Title: "create done.txt", Prompt: "Create a file named done.txt.",
