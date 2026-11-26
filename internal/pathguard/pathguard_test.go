@@ -77,8 +77,8 @@ func TestWindowsAliases(t *testing.T) {
 	t.Parallel()
 	ws, _ := workspace(t)
 	for _, name := range []string{".git.", ".git ", ".git::$INDEX_ALLOCATION", "GIT~1"} {
-		if why, _ := Check(ws, filepath.Join(ws, name, "hooks", "x")); why == "" || !strings.Contains(why, "managed by OpenChef") {
-			t.Errorf("%q allowed: %q", name, why)
+		if why, err := Check(ws, filepath.Join(ws, name, "hooks", "x")); err != nil || !strings.Contains(why, "managed by OpenChef") {
+			t.Errorf("%q: %q, %v", name, why, err)
 		}
 	}
 }
