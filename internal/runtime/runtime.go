@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+
+	"github.com/ugurboz/openchef/internal/procs"
 )
 
 // Runtime starts and resumes sessions for one agent CLI.
@@ -70,6 +72,25 @@ type SessionSpec struct {
 	AskUser *MCPServer
 	// LogPath, if set, receives every raw protocol line (see package rawlog).
 	LogPath string
+	// OnSpawn, if set, is called after each agent process starts and before anything is
+	// written to it, so the engine can record the process first (§5.1). A session may
+	// start more than one process over its life (Claude respawns its process after an
+	// interrupt or crash); each start gets its own call. An error kills the new process
+	// and fails the Open, Resume or Turn that started it.
+	OnSpawn func(ctx context.Context, id procs.Identity) error
+}
+
+// Spawned reports a newly started process to OnSpawn. Adapters call it right after
+// procs.Start and before the first write; on error (wrapping ErrSpawnRejected) they
+// kill the process.
+func (s *SessionSpec) Spawned(ctx context.Context, id procs.Identity) error {
+	if s.OnSpawn == nil {
+		return nil
+	}
+	if err := s.OnSpawn(ctx, id); err != nil {
+		return fmt.Errorf("%w: pid %d: %w", ErrSpawnRejected, id.PID, err)
+	}
+	return nil
 }
 
 // MCPServer is a stdio MCP server command.

@@ -72,6 +72,10 @@ var ErrTurnInProgress = errors.New("runtime: a turn is already in progress")
 // ErrSessionClosed is returned by Session methods after Close or after the process died.
 var ErrSessionClosed = errors.New("runtime: session is closed")
 
+// ErrSpawnRejected means SessionSpec.OnSpawn refused a new process (for example because
+// the task was cancelled); the process was killed. Adapters do not retry the start.
+var ErrSpawnRejected = errors.New("runtime: process rejected by OnSpawn")
+
 // ProtocolError means the CLI sent something the adapter does not understand where it
 // must. It carries the offending line for diagnosis.
 type ProtocolError struct {

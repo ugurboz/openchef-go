@@ -14,6 +14,7 @@ import (
 
 	"github.com/ugurboz/openchef/internal/procs"
 	"github.com/ugurboz/openchef/internal/runtime"
+	"github.com/ugurboz/openchef/internal/runtime/runtimetest"
 )
 
 type recordingApprover struct {
@@ -405,6 +406,8 @@ func TestInterruptKeepsProcess(t *testing.T) {
 func TestStubbornInterruptKillsAndResumes(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, "1")
+	rec := &runtimetest.SpawnRecorder{FakeLog: h.logPath}
+	h.spec.OnSpawn = rec.OnSpawn
 	s := h.open()
 	end, _ := turn(t, s, runtime.TurnInput{Text: "remember:KESTREL"})
 	mustComplete(t, end, "Hello")
@@ -429,6 +432,13 @@ func TestStubbornInterruptKillsAndResumes(t *testing.T) {
 	}
 	if v, _ := flag(l[1], "--resume"); v != s.Ref().ID {
 		t.Errorf("replacement process: %v", l[1])
+	}
+	// The replacement process is reported too, so the engine can update its record.
+	if ids := rec.IDs(); len(ids) != 2 || ids[0].PID == ids[1].PID {
+		t.Errorf("OnSpawn calls = %+v; want two distinct processes", ids)
+	}
+	if err := rec.Err(); err != nil {
+		t.Error(err)
 	}
 }
 
