@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,8 +61,9 @@ type cliEnv struct {
 	claude *fake.Runtime
 	deps   Deps
 
-	once sync.Once
-	stop func()
+	once  sync.Once
+	stop  func()
+	quota *service.Quota
 }
 
 func newCLIEnv(t *testing.T) *cliEnv {
@@ -118,8 +120,20 @@ func (e *cliEnv) startDaemon() {
 		if err != nil {
 			return daemon.Services{}, err
 		}
-		return daemon.Services{Methods: daemon.ServiceMethods(svc), OnStop: func(ctx context.Context) error {
-			return errors.Join(svc.Stop(ctx), db.Close())
+		quotas, err := service.NewQuota(service.QuotaDeps{Store: db})
+		if err != nil {
+			return daemon.Services{}, err
+		}
+		if err := quotas.Start(ctx); err != nil {
+			return daemon.Services{}, err
+		}
+		methods := daemon.ServiceMethods(svc)
+		maps.Copy(methods, daemon.QuotaMethods(quotas))
+		e.quota = quotas
+		return daemon.Services{Methods: methods, OnStop: func(ctx context.Context) error {
+			err := svc.Stop(ctx)
+			quotas.Stop()
+			return errors.Join(err, db.Close())
 		}}, nil
 	}}
 	go func() { done <- daemon.Run(ctx, opts) }()

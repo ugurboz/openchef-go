@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,6 +36,7 @@ func newInitCommand(deps Deps) *cobra.Command {
 		force  bool
 		dryRun bool
 		plans  map[string]string
+		probes string
 	)
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -65,6 +68,11 @@ func newInitCommand(deps Deps) *cobra.Command {
 			}
 
 			cfg := config.Default(usable, plans)
+			on, err := probeConsent(cmd, probes, dryRun)
+			if err != nil {
+				return err
+			}
+			cfg.Quota.Probes = &on
 			body, err := cfg.Marshal()
 			if err != nil {
 				return err
@@ -88,6 +96,7 @@ func newInitCommand(deps Deps) *cobra.Command {
 				p.printf("Skipped:  %s\n", s)
 			}
 			p.printf("Plans:    %s\n", describePlans(cfg))
+			p.printf("Probes:   %s (change with: openchef quota probes on|off)\n", map[bool]string{true: "on", false: "off"}[on])
 			p.printf("Next:     openchef doctor\n")
 			return p.err
 		},
@@ -95,7 +104,52 @@ func newInitCommand(deps Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing configuration")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the configuration instead of writing it")
 	cmd.Flags().StringToStringVar(&plans, "plan", nil, "subscription tier per runtime, e.g. claude=max (repeatable)")
+	cmd.Flags().StringVar(&probes, "quota-probes", "", "on or off: read your CLIs' logins to check plan usage (asked when omitted)")
 	return cmd
+}
+
+// probesExplained is shown before asking (§10.2: init explains the probes and asks).
+const probesExplained = `Usage probes let OpenChef route by how much of each plan is left. They read the
+login Claude Code and Codex stored on this machine (read only; never refreshed,
+stored or sent anywhere but the provider) and call the providers' usage endpoints,
+which are undocumented: they may change or be disallowed at any time. Use at your
+own risk.`
+
+// probeConsent decides whether L2 probes start on: the flag, else the user's answer on
+// a terminal (default yes, the maintainers' default), else on.
+func probeConsent(cmd *cobra.Command, flag string, dryRun bool) (bool, error) {
+	switch flag {
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	case "":
+	default:
+		return false, fmt.Errorf("--quota-probes: want on or off, not %q", flag)
+	}
+	in := cmd.InOrStdin()
+	if f, ok := in.(*os.File); dryRun || !ok || !isTerminal(f) {
+		return true, nil
+	}
+	out := cmd.OutOrStdout()
+	if _, err := fmt.Fprintf(out, "%s\nEnable usage probes? [Y/n] ", probesExplained); err != nil {
+		return false, fmt.Errorf("write prompt: %w", err)
+	}
+	answer, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read answer: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "", "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func isTerminal(f *os.File) bool {
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }
 
 func validatePlanFlags(plans map[string]string) error {

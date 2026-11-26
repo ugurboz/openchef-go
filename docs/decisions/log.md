@@ -449,3 +449,31 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** `TestAskUserThroughTheDaemon` (MCP client → server → daemon queue →
   `openchef answer` → tool result), `TestHandshakeAndToolList`, `TestAskUserAnswers`,
   `TestAskUserUnanswered`, adapter timeout tests.
+
+## D-025 — Quota wiring: stored observations, stream before probes, kill switch in the store
+*2026-11-26 · M4.6*
+
+- **Context:** the quota package (#41) merges observations and runs probes; the daemon
+  must feed it, keep it across restarts, schedule probes and let the user stop them.
+- **Decision:**
+  - Every observation (L1 from agent streams through an engine-sink decorator, L2 from
+    probes) goes to `quota_observations`; a restarted daemon replays the last 8 days (a
+    weekly window) and prunes older rows. Storing is asynchronous and bounded: the
+    engine's sink must not block, so a backlog keeps the observation for routing and
+    logs that it was not stored.
+  - Probes run every 5 minutes, but a pool observed within that interval is skipped:
+    the agents' own streams (Codex's rate-limit methods, Claude's `rate_limit_event`)
+    are preferred over undocumented endpoints (§10.2). `openchef quota --refresh`
+    always probes, still at most every 30 s per probe.
+  - Switches: `quota.probes` and `quota.providers.<provider>` in `config.toml` decide
+    which probes exist; `openchef quota probes off|on` is stored in the state database
+    (`flags`) so it outlives the daemon without OpenChef rewriting the user's file. The
+    config wins: the CLI switch cannot turn on a probe the config left out.
+  - `openchef init` explains the probes and asks on a terminal (default yes), takes
+    `--quota-probes on|off`, and writes the choice into the config. `doctor` shows a
+    running daemon's probes, including one that disabled itself after a shape change.
+  - L3 (per-step cost history) moves to M4.7, where admission is its only consumer.
+- **Consequences:** `TestQuotaObservePersistAndRestore`, `TestQuotaProbesAndKillSwitch`,
+  `TestQuotaShapeChangeDisablesProbe`, `TestQuotaScheduleSkipsFreshPools`,
+  `TestQuotaSinkRecordsStreamSignals`, `TestProbesFor`, `TestQuotaCommand`,
+  `TestDoctorShowsDisabledProbes`, `TestInitRecordsProbeConsent`.
