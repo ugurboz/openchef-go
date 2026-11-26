@@ -43,6 +43,8 @@ func helper(mode string) int {
 			fmt.Print(line)
 		}
 		fmt.Print("END\n")
+		return 1
+	case "stderr":
 		fmt.Fprint(os.Stderr, "on stderr\n")
 		return 1
 	case "sleep":
@@ -118,10 +120,17 @@ func TestOutputKeepsHeadAndTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Truncated || !strings.HasPrefix(res.Output, "BEGIN\n") || !strings.Contains(res.Output, "END\n") ||
-		!strings.Contains(res.Output, "on stderr\n") ||
+	if !res.Truncated || !strings.HasPrefix(res.Output, "BEGIN\n") || !strings.HasSuffix(res.Output, "END\n") ||
 		!strings.Contains(res.Output, "bytes omitted") || len(res.Output) > 1100 {
 		t.Fatalf("truncated output (%d bytes): %q", len(res.Output), res.Output)
+	}
+}
+
+func TestStderrIsCaptured(t *testing.T) {
+	t.Parallel()
+	res, err := Run(context.Background(), spec(t, "stderr"))
+	if err != nil || res.Passed || !strings.Contains(res.Output, "on stderr") {
+		t.Fatalf("%+v, %v", res, err)
 	}
 }
 
@@ -171,8 +180,18 @@ func TestTimeoutKillsTree(t *testing.T) {
 	if !ok {
 		t.Fatal("grandchild never started")
 	}
-	if alive, err := procs.Alive(id); err != nil || alive {
-		t.Fatalf("grandchild %d alive = %t, %v", id.PID, alive, err)
+	// The kill is synchronous, but a killed process can stay a zombie for a moment
+	// until it is reaped (on a loaded machine), and Alive still sees it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		alive, err := procs.Alive(id)
+		if err == nil && !alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild %d alive = %t, %v", id.PID, alive, err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
