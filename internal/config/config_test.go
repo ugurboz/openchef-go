@@ -254,3 +254,27 @@ func TestPaths(t *testing.T) {
 		t.Fatal("empty home should fail")
 	}
 }
+
+func TestQuotaSwitches(t *testing.T) {
+	t.Parallel()
+	base := "[pools.p]\nprovider = \"anthropic\"\nbilling = \"subscription\"\n" +
+		"[agents.a]\nruntime = \"claude\"\npool = \"p\"\ntier = \"frontier\"\n"
+	cfg, err := Parse([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Quota.ProbesEnabled("anthropic") {
+		t.Error("probes are on by default (§10.2)")
+	}
+	cfg, err = Parse([]byte(base + "[quota]\nprobes = false\n[quota.providers]\nanthropic = true\n"))
+	if err != nil || cfg.Quota.ProbesEnabled("anthropic") {
+		t.Errorf("global off must win: %v", err)
+	}
+	cfg, err = Parse([]byte(base + "[quota.providers]\nopenai = false\n"))
+	if err != nil || cfg.Quota.ProbesEnabled("openai") || !cfg.Quota.ProbesEnabled("anthropic") {
+		t.Errorf("per provider: %v", err)
+	}
+	if _, err := Parse([]byte(base + "[quota.providers]\nmistral = false\n")); err == nil {
+		t.Error("unknown provider accepted")
+	}
+}

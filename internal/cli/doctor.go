@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ugurboz/openchef/internal/api"
 	"github.com/ugurboz/openchef/internal/config"
 	"github.com/ugurboz/openchef/internal/doctor"
 )
@@ -27,7 +29,9 @@ type doctorReport struct {
 	Paths    config.Paths           `json:"paths"`
 	Config   configReport           `json:"config"`
 	Runtimes []doctor.RuntimeStatus `json:"runtimes"`
-	Healthy  bool                   `json:"healthy"`
+	// Probes are the running daemon's quota probes (§10.2); nil without a daemon.
+	Probes  []api.ProbeStatus `json:"probes,omitempty"`
+	Healthy bool              `json:"healthy"`
 }
 
 type configReport struct {
@@ -89,6 +93,8 @@ func buildDoctorReport(cmd *cobra.Command, deps Deps) (doctorReport, error) {
 		report.Config = configReport{Status: configInvalid, Problems: []string{err.Error()}}
 	}
 
+	report.Probes = daemonProbes(cmd.Context(), deps)
+
 	usable := false
 	for _, r := range report.Runtimes {
 		usable = usable || r.Usable()
@@ -115,6 +121,12 @@ func renderDoctor(w io.Writer, r doctorReport) error {
 	p.printf("\nRuntime\tVersion\tStatus\tPath\n")
 	for _, rt := range r.Runtimes {
 		p.printf("%s\t%s\t%s\t%s\n", rt.Runtime, orDash(rt.Version), runtimeState(rt), orDash(rt.Path))
+	}
+	if len(r.Probes) > 0 {
+		p.printf("\nQuota probe\tPool\tStatus\n")
+		for _, pr := range r.Probes {
+			p.printf("%s\t%s\t%s\n", pr.Name, pr.Pool, orDash(pr.Problem))
+		}
 	}
 	if !r.Healthy {
 		p.printf("\nOpenChef cannot run yet: ")
@@ -173,4 +185,19 @@ func (p *printer) printf(format string, args ...any) {
 	if _, err := fmt.Fprintf(p.w, format, args...); err != nil {
 		p.err = fmt.Errorf("write: %w", err)
 	}
+}
+
+// daemonProbes asks a running daemon for its quota probes, so a probe that disabled
+// itself after a response changed shape shows here (§10.2). No daemon, no probes.
+func daemonProbes(ctx context.Context, deps Deps) []api.ProbeStatus {
+	c, err := connect(ctx, deps, false)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = c.Close() }()
+	r, err := c.Quota(ctx, api.QuotaParams{})
+	if err != nil {
+		return nil // an older daemon without quota: nothing to report
+	}
+	return r.Probes
 }

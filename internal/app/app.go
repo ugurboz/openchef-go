@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"sync"
@@ -66,12 +67,25 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 	if err != nil {
 		return daemon.Services{}, errors.Join(fmt.Errorf("app: locate openchef executable: %w", err), db.Close())
 	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return daemon.Services{}, errors.Join(fmt.Errorf("app: locate home directory: %w", err), db.Close())
+	}
+	//nolint:contextcheck // probes read credentials under their own timeout, per request
+	quotas, err := service.NewQuota(service.QuotaDeps{Store: db, Probes: probesFor(cfg, userHome), Log: log})
+	if err != nil {
+		return daemon.Services{}, errors.Join(err, db.Close())
+	}
+	if err := quotas.Start(ctx); err != nil {
+		return daemon.Services{}, errors.Join(err, db.Close())
+	}
+	poolOf := func(agent string) string { return cfg.Agents[agent].Pool }
 	svc, err := service.New(service.Deps{ //nolint:contextcheck // notifications are fire-and-forget with their own timeout
 		Store: db, EventDir: paths.Sessions, Log: log, Notify: desktopNotifier(log),
 		DefaultPermissions: pols.defaultMode,
 		NewEngine: func(sink engine.Sink) (*engine.Engine, error) {
 			return engine.New(engine.Config{
-				Store: db, Runtimes: runtimes, Router: router, Sink: sink,
+				Store: db, Runtimes: runtimes, Router: router, Sink: quotaSink{next: sink, quota: quotas, poolOf: poolOf},
 				SpecFor: func(t *task.Task, a engine.Agent) (runtime.SessionSpec, error) {
 					ps, err := pols.session(t)
 					if err != nil {
@@ -94,20 +108,25 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 		},
 	})
 	if err != nil {
+		quotas.Stop()
 		return daemon.Services{}, errors.Join(err, db.Close())
 	}
 	queue.svc = svc // before Start: no session runs until then
 	if err := svc.Start(ctx); err != nil {
+		quotas.Stop()
 		return daemon.Services{}, errors.Join(err, db.Close())
 	}
+	methods := daemon.ServiceMethods(svc)
+	maps.Copy(methods, daemon.QuotaMethods(quotas))
 	return daemon.Services{
-		Methods: daemon.ServiceMethods(svc),
+		Methods: methods,
 		OnStop: func(ctx context.Context) error {
 			if err := svc.Stop(ctx); err != nil {
 				// Runs that did not stop still use the store; the process is exiting,
 				// so leave the database to the OS rather than closing it under them.
 				return err
 			}
+			quotas.Stop() // after the runs: their last observations are stored
 			return db.Close()
 		},
 	}, nil

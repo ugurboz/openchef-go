@@ -212,3 +212,32 @@ func TestInitErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestInitRecordsProbeConsent(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{nil, true}, // not a terminal: the default, written down
+		{[]string{"--quota-probes", "off"}, false},
+		{[]string{"--quota-probes", "on"}, true},
+	} {
+		deps, paths := fakeEnv(t, []string{"claude"}, []string{"claude"})
+		out, err := runWith(t, deps, append([]string{"init"}, tc.args...)...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", tc.args, err, out)
+		}
+		cfg, err := config.Load(paths.Config)
+		if err != nil || cfg.Quota.Probes == nil || *cfg.Quota.Probes != tc.want || cfg.Quota.ProbesEnabled("anthropic") != tc.want {
+			t.Errorf("%v: probes %v, %v", tc.args, cfg.Quota.Probes, err)
+		}
+		if !strings.Contains(out, "Probes:") {
+			t.Errorf("%v: output does not say:\n%s", tc.args, out)
+		}
+	}
+	deps, _ := fakeEnv(t, []string{"claude"}, []string{"claude"})
+	if _, err := runWith(t, deps, "init", "--quota-probes", "maybe"); err == nil {
+		t.Error("bad --quota-probes accepted")
+	}
+}

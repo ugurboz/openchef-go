@@ -31,6 +31,26 @@ type Config struct {
 	Pools   map[string]Pool  `toml:"pools"`
 	Agents  map[string]Agent `toml:"agents"`
 	Routing map[string]Phase `toml:"routing"`
+	Quota   Quota            `toml:"quota"`
+}
+
+// Quota configures quota tracking (§10).
+type Quota struct {
+	// Probes turns L2 probes on or off for every provider; unset means on (§10.2).
+	Probes *bool `toml:"probes,omitempty"`
+	// Providers switches probes per provider ("anthropic", "openai").
+	Providers map[string]bool `toml:"providers,omitempty"`
+}
+
+// ProbesEnabled reports whether L2 probes may run for provider.
+func (q Quota) ProbesEnabled(provider string) bool {
+	if q.Probes != nil && !*q.Probes {
+		return false
+	}
+	if on, ok := q.Providers[provider]; ok {
+		return on
+	}
+	return true
 }
 
 // Pool is one quota bucket the user owns.
@@ -217,6 +237,11 @@ func (c *Config) Validate() error {
 			seen[a] = true
 		}
 		validateWeights(key, ph, seen, add)
+	}
+	for _, name := range sortedKeys(c.Quota.Providers) {
+		if !slices.Contains(Providers, name) {
+			add("quota.providers.%s: unknown provider (want one of %s)", name, strings.Join(Providers, ", "))
+		}
 	}
 
 	if len(problems) > 0 {
