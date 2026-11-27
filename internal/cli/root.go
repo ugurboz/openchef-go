@@ -79,6 +79,7 @@ func NewRootCommandWith(streams IO, deps Deps) *cobra.Command {
 		newApproveCommand(deps),
 		newDenyCommand(deps),
 		newAnswerCommand(deps),
+		newMCPCommand(deps),
 	)
 	return root
 }

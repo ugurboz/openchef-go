@@ -17,6 +17,7 @@ import (
 	"github.com/ugurboz/openchef/internal/config"
 	"github.com/ugurboz/openchef/internal/daemon"
 	"github.com/ugurboz/openchef/internal/engine"
+	"github.com/ugurboz/openchef/internal/mcp"
 	"github.com/ugurboz/openchef/internal/runtime"
 	"github.com/ugurboz/openchef/internal/runtime/agy"
 	"github.com/ugurboz/openchef/internal/runtime/claude"
@@ -61,6 +62,10 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 	if err != nil {
 		return daemon.Services{}, errors.Join(err, db.Close())
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		return daemon.Services{}, errors.Join(fmt.Errorf("app: locate openchef executable: %w", err), db.Close())
+	}
 	svc, err := service.New(service.Deps{ //nolint:contextcheck // notifications are fire-and-forget with their own timeout
 		Store: db, EventDir: paths.Sessions, Log: log, Notify: desktopNotifier(log),
 		DefaultPermissions: pols.defaultMode,
@@ -78,6 +83,7 @@ func services(ctx context.Context, paths config.Paths, version string, log *slog
 						AskRules:  ps.askRules,
 						Env:       sessionEnv(env, cfg.Pools[a.Pool]),
 						Approver:  approver{queue: queue, eval: ps.eval, task: t.ID, agent: a.Name},
+						AskUser:   askUserServer(exe, paths, t.ID, a.Name),
 					}, nil
 				},
 				VerifyEnv:     verify.MinimalEnv(env),
@@ -156,4 +162,16 @@ func (c *cooldowns) get(pool string) time.Time {
 		return time.Time{}
 	}
 	return u
+}
+
+// askUserServer is the ask_user MCP server for one task's agent: this executable's
+// hidden `mcp ask-user` command, which forwards questions to the daemon's queue. The
+// tool timeout outlasts the queue's, so the queue, not the CLI, ends a wait.
+func askUserServer(exe string, paths config.Paths, id task.ID, agent string) *runtime.MCPServer {
+	return &runtime.MCPServer{
+		Name: mcp.ServerName, Command: exe,
+		Args:        []string{"mcp", "ask-user", "--task", string(id), "--agent", agent},
+		Env:         []string{config.HomeEnv + "=" + paths.Home},
+		ToolTimeout: task.ApprovalTimeout + time.Minute,
+	}
 }
