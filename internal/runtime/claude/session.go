@@ -130,7 +130,7 @@ func (s *session) spawn(ctx context.Context, schema json.RawMessage, fallback bo
 	resume := s.started
 	s.mu.Unlock()
 	err := s.spawnOnce(ctx, resume, schema)
-	if err == nil || !fallback || s.isClosed() {
+	if err == nil || !fallback || s.isClosed() || errors.Is(err, runtime.ErrSpawnRejected) {
 		return err
 	}
 	s.log.Notef(rawlog.Note, "claude: start with resume=%t failed, retrying with resume=%t: %v", resume, !resume, err)
@@ -156,11 +156,14 @@ func (s *session) spawnOnce(ctx context.Context, resume bool, schema json.RawMes
 		Path:   s.rt.opts.Binary,
 		Args:   append(append([]string(nil), s.rt.opts.PrefixArgs...), args...),
 		Dir:    s.spec.Dir,
-		Env:    s.spec.Env,
+		Env:    processEnv(&s.spec),
 		Stderr: io.MultiWriter(s.log.LineWriter(rawlog.Stderr), stderr),
 	})
 	if err != nil {
 		return fmt.Errorf("claude: start: %w", err)
+	}
+	if err := s.spec.Spawned(ctx, p.Identity()); err != nil {
+		return errors.Join(fmt.Errorf("claude: %w", err), p.Close(context.WithoutCancel(ctx)))
 	}
 	g := newProc(p.Stdin, p)
 	g.stderr = stderr
@@ -320,7 +323,10 @@ func (s *session) interrupt(ctx context.Context, ts *turnState, wait time.Durati
 	s.endTurn(ts, runtime.Event{Kind: runtime.EventTurnFailed, Failure: &runtime.Failure{
 		Kind: s.stopKind(ts), Message: "turn did not stop after interrupt; process killed",
 	}})
-	if err != nil && !errors.Is(err, runtime.ErrSessionClosed) {
+	// A control request that timed out is what the kill above remedies; only other
+	// failures (the pipe broke) are worth reporting.
+	if err != nil && !errors.Is(err, runtime.ErrSessionClosed) &&
+		!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("claude: interrupt: %w", err)
 	}
 	return nil
@@ -806,4 +812,19 @@ func (t *tailBuffer) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return strings.TrimSpace(string(t.buf))
+}
+
+// processEnv is the CLI's environment: the spec's, plus the MCP tool timeout Claude
+// reads from MCP_TOOL_TIMEOUT (milliseconds) when OpenChef's server needs a longer one.
+func processEnv(spec *runtime.SessionSpec) []string {
+	if spec.AskUser == nil || spec.AskUser.ToolTimeout <= 0 {
+		return spec.Env
+	}
+	env := make([]string, 0, len(spec.Env)+1)
+	for _, kv := range spec.Env {
+		if !strings.HasPrefix(kv, "MCP_TOOL_TIMEOUT=") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "MCP_TOOL_TIMEOUT="+strconv.FormatInt(spec.AskUser.ToolTimeout.Milliseconds(), 10))
 }

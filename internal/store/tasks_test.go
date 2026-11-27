@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"slices"
@@ -51,7 +52,7 @@ func newRunTask(t *testing.T) (task.Task, []task.Step) {
 	tk := task.Task{
 		ID: id, Kind: task.KindRun, Status: task.StatusRunning, Prompt: "add rate limiting",
 		RepoRoot: "/repo", Mode: task.ModeIsolated, Backend: task.BackendLocal,
-		Importance: task.ImportanceNormal,
+		Importance: task.ImportanceNormal, Permissions: task.PermissionsAcceptEdits,
 	}
 	steps := []task.Step{{
 		Index: 1, Title: "add rate limiting", Prompt: "add rate limiting",
@@ -553,5 +554,43 @@ func TestTimeFormatSorts(t *testing.T) {
 	back, err := parseTime(formatTime(b.In(time.FixedZone("x", 3600))))
 	if err != nil || !back.Equal(b) {
 		t.Fatalf("round trip = %v, %v", back, err)
+	}
+}
+
+// Tasks created before migration 0004 ran under the M3 policy (D-020): acceptEdits.
+func TestPermissionModeMigration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := dbPath(t)
+	early := map[string]string{}
+	for _, name := range []string{"0001_meta.sql", "0002_tasks.sql", "0003_approvals.sql"} {
+		body, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		early[name] = string(body)
+	}
+	old, err := open(ctx, path, testMigrations(early))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO tasks (id, kind, status, prompt, repo_root, mode, backend, importance, created_at, updated_at)
+			VALUES ('0123456789', 'run', 'done', 'p', '/r', 'isolated', 'local', 'normal', ?, ?)`, formatTime(time.Now()), formatTime(time.Now()))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	got, err := db.Task(ctx, "0123456789")
+	if err != nil || got.Permissions != task.PermissionsAcceptEdits {
+		t.Fatalf("migrated task %+v, %v", got, err)
 	}
 }

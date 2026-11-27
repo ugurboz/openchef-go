@@ -45,12 +45,12 @@ func (db *DB) CreateTask(ctx context.Context, t *task.Task, steps []task.Step) e
 	err := db.Write(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks
 			(id, kind, status, prompt, repo_root, base_commit, mode, backend, importance,
-			 agent_pin, branch, worktree, resume_at, reason, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 agent_pin, branch, worktree, resume_at, reason, created_at, updated_at, permission_mode)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			string(t.ID), string(t.Kind), string(t.Status), t.Prompt, t.RepoRoot,
 			nullString(t.BaseCommit), string(t.Mode), string(t.Backend), string(t.Importance),
 			nullString(t.AgentPin), nullString(t.Branch), nullString(t.Worktree),
-			nullTime(t.ResumeAt), nullString(t.Reason), formatTime(now), formatTime(now),
+			nullTime(t.ResumeAt), nullString(t.Reason), formatTime(now), formatTime(now), string(t.Permissions),
 		); err != nil {
 			return fmt.Errorf("store: insert task %s: %w", t.ID, err)
 		}
@@ -94,7 +94,7 @@ func insertStep(ctx context.Context, tx *sql.Tx, id task.ID, s *task.Step, now t
 }
 
 const taskColumns = `id, kind, status, prompt, repo_root, base_commit, mode, backend,
-	importance, agent_pin, branch, worktree, resume_at, reason, created_at, updated_at`
+	importance, agent_pin, branch, worktree, resume_at, reason, created_at, updated_at, permission_mode`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -106,17 +106,18 @@ func scanTask(r rowScanner) (task.Task, error) {
 		id, kind, status, mode, backend, importance    string
 		baseCommit, agentPin, branch, worktree, reason sql.NullString
 		resumeAt                                       sql.NullString
-		created, updated                               string
+		created, updated, permissions                  string
 	)
 	if err := r.Scan(&id, &kind, &status, &t.Prompt, &t.RepoRoot, &baseCommit, &mode,
 		&backend, &importance, &agentPin, &branch, &worktree, &resumeAt, &reason,
-		&created, &updated); err != nil {
+		&created, &updated, &permissions); err != nil {
 		return task.Task{}, err // callers wrap with context and map sql.ErrNoRows
 	}
 	t.ID, t.Kind, t.Status = task.ID(id), task.Kind(kind), task.Status(status)
 	t.Mode, t.Backend, t.Importance = task.Mode(mode), task.Backend(backend), task.Importance(importance)
 	t.BaseCommit, t.AgentPin, t.Branch = baseCommit.String, agentPin.String, branch.String
 	t.Worktree, t.Reason = worktree.String, reason.String
+	t.Permissions = task.PermissionMode(permissions)
 	var err error
 	if t.ResumeAt, err = parseNullTime(resumeAt); err != nil {
 		return task.Task{}, err

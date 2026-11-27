@@ -14,6 +14,7 @@ import (
 
 	"github.com/ugurboz/openchef/internal/procs"
 	"github.com/ugurboz/openchef/internal/runtime"
+	"github.com/ugurboz/openchef/internal/runtime/runtimetest"
 )
 
 type recordingApprover struct {
@@ -22,6 +23,9 @@ type recordingApprover struct {
 	err       error
 	block     bool // wait for ctx instead of deciding
 	cancelled chan struct{}
+	// started, if set, is created when a blocking Approve begins, so the fake CLI can
+	// cancel a request the approver is really waiting on (TestPermissionCancelledByClaude).
+	started   string
 	approvals []runtime.ApprovalRequest
 }
 
@@ -31,6 +35,9 @@ func (a *recordingApprover) Approve(ctx context.Context, req runtime.ApprovalReq
 	block := a.block
 	a.mu.Unlock()
 	if block {
+		if a.started != "" {
+			_ = os.WriteFile(a.started, nil, 0o600) // the fake polls for it
+		}
 		<-ctx.Done()
 		close(a.cancelled)
 		return runtime.Decision{}, ctx.Err()
@@ -370,6 +377,7 @@ func TestPermissionCancelledByClaude(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, "1")
 	h.appr.block = true
+	h.appr.started = filepath.Join(filepath.Dir(h.logPath), "transcripts", approverStartedFile)
 	end, _ := turn(t, h.open(), runtime.TurnInput{Text: "cancelperm"})
 	mustComplete(t, end, "cancelled")
 	select {
@@ -405,6 +413,8 @@ func TestInterruptKeepsProcess(t *testing.T) {
 func TestStubbornInterruptKillsAndResumes(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, "1")
+	rec := &runtimetest.SpawnRecorder{FakeLog: h.logPath}
+	h.spec.OnSpawn = rec.OnSpawn
 	s := h.open()
 	end, _ := turn(t, s, runtime.TurnInput{Text: "remember:KESTREL"})
 	mustComplete(t, end, "Hello")
@@ -429,6 +439,13 @@ func TestStubbornInterruptKillsAndResumes(t *testing.T) {
 	}
 	if v, _ := flag(l[1], "--resume"); v != s.Ref().ID {
 		t.Errorf("replacement process: %v", l[1])
+	}
+	// The replacement process is reported too, so the engine can update its record.
+	if ids := rec.IDs(); len(ids) != 2 || ids[0].PID == ids[1].PID {
+		t.Errorf("OnSpawn calls = %+v; want two distinct processes", ids)
+	}
+	if err := rec.Err(); err != nil {
+		t.Error(err)
 	}
 }
 

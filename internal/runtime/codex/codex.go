@@ -116,6 +116,9 @@ func (r *Runtime) start(ctx context.Context, spec runtime.SessionSpec) (*session
 		_ = log.Close() // the start error is the one worth reporting
 		return nil, fmt.Errorf("codex: start app-server: %w", err)
 	}
+	if err := spec.Spawned(ctx, proc.Identity()); err != nil {
+		return nil, errors.Join(fmt.Errorf("codex: %w", err), proc.Close(context.WithoutCancel(ctx)), log.Close())
+	}
 	s := newSession(spec, proc, log)
 	s.peer = linerpc.New(proc.Stdout, proc.Stdin, linerpc.Options{
 		Log:             log,
@@ -183,6 +186,9 @@ func sandboxFor(mode runtime.Mode) string {
 
 func mcpServerConfig(m *runtime.MCPServer) map[string]any {
 	cfg := map[string]any{"command": m.Command, "args": m.Args}
+	if m.ToolTimeout > 0 {
+		cfg["tool_timeout_sec"] = m.ToolTimeout.Seconds()
+	}
 	if len(m.Env) > 0 {
 		env := map[string]string{}
 		for _, kv := range m.Env {
