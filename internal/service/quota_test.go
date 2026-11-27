@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -163,5 +164,99 @@ func TestQuotaScheduleSkipsFreshPools(t *testing.T) {
 	q.Report(ctx, true) // a manual refresh always probes
 	if calls.Load() != 1 {
 		t.Fatalf("refresh calls %d", calls.Load())
+	}
+}
+
+// Each attempt's cost is the window share it used; three make an estimate, and the
+// history survives a restart.
+func TestQuotaStepCosts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	tick := func() { mu.Lock(); now = now.Add(time.Minute); mu.Unlock() }
+	db := openQuotaStore(t, t.TempDir())
+	q, _ := NewQuota(QuotaDeps{Store: db, Now: clock})
+	if err := q.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reset := now.Add(4 * time.Hour)
+	util := 0.10
+	observe := func() {
+		q.Observe(quota.Observation{Pool: "p", Source: quota.SourceStream, At: clock(),
+			Windows: []quota.Window{{Name: "five_hour", Utilization: util, ResetsAt: reset}}})
+	}
+	observe()
+	for i, spend := range []float64{0.02, 0.04, 0.03} {
+		tick()
+		q.AttemptStarted(int64(i+1), "p")
+		util += spend
+		tick()
+		observe()
+		q.AttemptEnded(int64(i + 1))
+	}
+	q.AttemptStarted(9, "p") // nothing observed during it: no cost recorded
+	q.AttemptEnded(9)
+	est, known := q.Estimate("p")
+	if !known || est < 0.0399 || est > 0.0401 {
+		t.Fatalf("estimate %v %v", est, known)
+	}
+	q.Stop()
+	again, _ := NewQuota(QuotaDeps{Store: db, Now: clock})
+	if err := again.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer again.Stop()
+	if est2, known := again.Estimate("p"); !known || est2 != est {
+		t.Fatalf("after restart %v %v", est2, known)
+	}
+	again.Exhausted("p", time.Time{})
+	if h, at := again.Health("p"); h != quota.Exhausted || !at.Equal(clock().Add(time.Hour)) {
+		t.Fatalf("exhausted: %s until %v", h, at)
+	}
+}
+
+// An API pool's spending is a quota window: past its daily budget it is exhausted
+// until midnight, and the spending survives a restart. Subscriptions record nothing.
+func TestQuotaBudgets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	loc := time.FixedZone("TRT", 3*3600)
+	now := time.Date(2026, 11, 26, 20, 0, 0, 0, loc)
+	clock := func() time.Time { return now }
+	db := openQuotaStore(t, t.TempDir())
+	deps := QuotaDeps{Store: db, Now: clock, Location: loc,
+		Budgets: map[string]Budget{"api": {DailyUSD: 2, MonthlyUSD: 100}, "free-api": {}}}
+	q, _ := NewQuota(deps)
+	if err := q.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	q.Spend("api", 1.2, now)
+	if h, _ := q.Health("api"); h != quota.Yellow {
+		t.Fatalf("60%% of the day's budget: %s", h)
+	}
+	q.Spend("api", 0.9, now)
+	h, until := q.Health("api")
+	if h != quota.Exhausted || !until.Equal(time.Date(2026, 11, 27, 0, 0, 0, 0, loc)) {
+		t.Fatalf("over budget: %s until %v", h, until)
+	}
+	q.Spend("claude-max", 5, now) // a subscription's notional cost
+	q.Spend("free-api", 3, now)   // unlimited: recorded only
+	if h, _ := q.Health("free-api"); h != quota.Unknown {
+		t.Fatalf("unlimited pool health %s", h)
+	}
+	q.Stop()
+	spent, err := db.SpendSince(ctx, time.Time{})
+	if err != nil || len(spent["api"]) != 2 || len(spent["free-api"]) != 1 || len(spent["claude-max"]) != 0 {
+		t.Fatalf("stored %v, %v", spent, err)
+	}
+	again, _ := NewQuota(deps)
+	if err := again.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer again.Stop()
+	if h, _ := again.Health("api"); h != quota.Exhausted {
+		t.Fatalf("after restart: %s", h)
 	}
 }

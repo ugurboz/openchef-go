@@ -477,3 +477,34 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   `TestQuotaShapeChangeDisablesProbe`, `TestQuotaScheduleSkipsFreshPools`,
   `TestQuotaSinkRecordsStreamSignals`, `TestProbesFor`, `TestQuotaCommand`,
   `TestDoctorShowsDisabledProbes`, `TestInitRecordsProbeConsent`.
+
+## D-026 — Admission by measured window share; budgets as windows; quota router replaces cooldowns
+*2026-11-26 · M4.7*
+
+- **Context:** §10.3 admits a step to a pool only if its headroom covers the step's
+  estimated cost with a 30 % margin, red pools take small steps only, and API pools have
+  USD budgets. Providers report windows as percentages, not tokens, so a token-based
+  cost estimate cannot be compared with headroom.
+- **Decision:**
+  - L3 measures each attempt's cost in the unit headroom is in: the largest increase of
+    a window's utilization between the attempt's start and end (`quota.Spent`), skipped
+    when nothing newer was observed or the window reset meanwhile; stored in `usage`.
+    The estimate is the 75th percentile of the pool's last 20 costs; under three samples
+    it is unknown and the step is admitted.
+  - `quota.Admit`: exhausted → never; red → only estimates ≤ 5 % of a window;
+    otherwise estimate × 1.3 ≤ the tightest window's headroom.
+  - API pools' reported turn costs (`total_cost_usd`) are stored in `spend` and become
+    windows `daily_usd` / `monthly_usd` (utilization = spent / budget, reset at local
+    midnight / the first of the month), so health, admission and routing treat budgets
+    exactly like quota windows. Subscriptions' notional costs are not recorded.
+  - The app's quota router builds router candidates (tier, health, headroom, reset,
+    API, weights, admission) and lets the phase's strategy choose; a pin skips
+    selection but not admission; with no candidate it waits for the earliest reset.
+    Effort is resolved for the chosen pool (profile, plan tier, pressure, surplus).
+    A quota failure on a turn records the pool as exhausted until its reset (an hour if
+    unknown). The M3 in-memory cooldowns are gone.
+- **Consequences:** `TestRoutingFollowsQuota`, `TestPinnedAgentIsAdmittedNotChosen`,
+  `TestWeightedSharesAndEffort` (3:1 within ±1 over 40 steps), `TestSpent`,
+  `TestEstimate`, `TestAdmit`, `TestQuotaStepCosts`, `TestQuotaBudgets`. Weighted
+  counters live for the daemon's life; persisting them is left for when a TUI shows
+  shares.

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -39,9 +40,24 @@ func TestProbesFor(t *testing.T) {
 	}
 }
 
-type recorder struct{ got []quota.Observation }
+type recorder struct {
+	got     []quota.Observation
+	started map[int64]string
+	ended   []int64
+	spent   []string
+}
 
 func (r *recorder) Observe(o quota.Observation) { r.got = append(r.got, o) }
+func (r *recorder) AttemptStarted(a int64, pool string) {
+	if r.started == nil {
+		r.started = map[int64]string{}
+	}
+	r.started[a] = pool
+}
+func (r *recorder) AttemptEnded(a int64) { r.ended = append(r.ended, a) }
+func (r *recorder) Spend(pool string, usd float64, _ time.Time) {
+	r.spent = append(r.spent, pool+":"+strconv.FormatFloat(usd, 'f', 2, 64))
+}
 
 func TestQuotaSinkRecordsStreamSignals(t *testing.T) {
 	t.Parallel()
@@ -54,7 +70,17 @@ func TestQuotaSinkRecordsStreamSignals(t *testing.T) {
 	s.Publish(engine.Event{Kind: engine.EventAgent, Agent: "opus", At: at, Runtime: signal})
 	s.Publish(engine.Event{Kind: engine.EventAgent, Agent: "ghost", At: at, Runtime: signal})
 	s.Publish(engine.Event{Kind: engine.EventNotice, Message: "x"})
-	if len(passed) != 3 {
+	s.Publish(engine.Event{Kind: engine.EventAttemptStarted, Attempt: 7, Agent: "opus"})
+	s.Publish(engine.Event{Kind: engine.EventAttemptEnded, Attempt: 7, Agent: "opus"})
+	if rec.started[7] != "claude-max" || len(rec.ended) != 1 || rec.ended[0] != 7 {
+		t.Fatalf("attempt hooks %v %v", rec.started, rec.ended)
+	}
+	s.Publish(engine.Event{Kind: engine.EventAgent, Agent: "opus", At: at, Runtime: &runtime.Event{Kind: runtime.EventTurnCompleted,
+		Result: &runtime.TurnResult{Usage: runtime.Usage{CostUSD: 0.42}}}})
+	if len(rec.spent) != 1 || rec.spent[0] != "claude-max:0.42" {
+		t.Fatalf("spend %v", rec.spent)
+	}
+	if len(passed) != 6 {
 		t.Fatalf("passed %d events", len(passed))
 	}
 	if len(rec.got) != 1 || rec.got[0].Pool != "claude-max" || rec.got[0].Source != quota.SourceStream || rec.got[0].Windows[0].Utilization != 0.5 {

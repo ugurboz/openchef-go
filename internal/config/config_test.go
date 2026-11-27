@@ -278,3 +278,21 @@ func TestQuotaSwitches(t *testing.T) {
 		t.Error("unknown provider accepted")
 	}
 }
+
+func TestBudgets(t *testing.T) {
+	t.Parallel()
+	agent := "[agents.a]\nruntime = \"claude\"\npool = \"p\"\ntier = \"frontier\"\n"
+	ok := "[pools.p]\nprovider = \"anthropic\"\nbilling = \"api\"\napi_key_env = \"ANTHROPIC_API_KEY\"\ndaily_budget_usd = 5\nmonthly_budget_usd = 50\n" + agent
+	cfg, err := Parse([]byte(ok))
+	if err != nil || cfg.Pools["p"].DailyBudgetUSD != 5 || cfg.Pools["p"].MonthlyBudgetUSD != 50 {
+		t.Fatalf("api budgets: %v", err)
+	}
+	for _, bad := range []string{
+		"[pools.p]\nprovider = \"anthropic\"\nbilling = \"subscription\"\ndaily_budget_usd = 5\n" + agent,
+		"[pools.p]\nprovider = \"anthropic\"\nbilling = \"api\"\napi_key_env = \"K\"\nmonthly_budget_usd = -1\n" + agent,
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("accepted:\n%s", bad)
+		}
+	}
+}

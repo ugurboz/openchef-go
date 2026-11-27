@@ -61,6 +61,9 @@ type Pool struct {
 	MaxConcurrent int    `toml:"max_concurrent,omitempty"`
 	EffortProfile string `toml:"effort_profile,omitempty"`
 	APIKeyEnv     string `toml:"api_key_env,omitempty"`
+	// DailyBudgetUSD and MonthlyBudgetUSD limit API pools (§10.3); 0 means no limit.
+	DailyBudgetUSD   float64 `toml:"daily_budget_usd,omitempty"`
+	MonthlyBudgetUSD float64 `toml:"monthly_budget_usd,omitempty"`
 }
 
 // Agent is a named (runtime, model, pool) triple.
@@ -199,6 +202,12 @@ func (c *Config) Validate() error {
 			add("%s.api_key_env: required for api billing (subscription keys are never used implicitly)", key)
 		case p.Billing != "api" && p.APIKeyEnv != "":
 			add("%s.api_key_env: only allowed with billing = \"api\"", key)
+		}
+		if p.DailyBudgetUSD < 0 || p.MonthlyBudgetUSD < 0 {
+			add("%s: budgets cannot be negative", key)
+		}
+		if p.Billing != "api" && (p.DailyBudgetUSD > 0 || p.MonthlyBudgetUSD > 0) {
+			add("%s: USD budgets apply to billing = \"api\" pools; subscriptions have quota windows", key)
 		}
 	}
 
