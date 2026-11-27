@@ -128,6 +128,27 @@ func (i Importance) AtLeast(floor Importance) Importance {
 	return i
 }
 
+// PermissionMode is a permission mode in Claude Code's vocabulary (§9.1). The runtime
+// layer has the same list (runtime.Modes); a test keeps them equal.
+type PermissionMode string
+
+// Permission modes.
+const (
+	PermissionsManual            PermissionMode = "manual"
+	PermissionsAcceptEdits       PermissionMode = "acceptEdits"
+	PermissionsPlan              PermissionMode = "plan"
+	PermissionsAuto              PermissionMode = "auto"
+	PermissionsDontAsk           PermissionMode = "dontAsk"
+	PermissionsBypassPermissions PermissionMode = "bypassPermissions"
+)
+
+// PermissionModes lists every mode.
+var PermissionModes = []PermissionMode{PermissionsManual, PermissionsAcceptEdits, PermissionsPlan,
+	PermissionsAuto, PermissionsDontAsk, PermissionsBypassPermissions}
+
+// Valid reports whether m is a known mode.
+func (m PermissionMode) Valid() bool { return slices.Contains(PermissionModes, m) }
+
 // TurnKind says why a message was sent to a session (§7.2, §5.3).
 type TurnKind string
 
@@ -167,6 +188,8 @@ type Task struct {
 	Importance Importance
 	// AgentPin, if set, disables routing for this task (§7.3).
 	AgentPin string
+	// Permissions is the task's permission mode (§9.1).
+	Permissions PermissionMode
 	// Branch and Worktree are set once the workspace exists.
 	Branch   string
 	Worktree string
@@ -198,6 +221,8 @@ func (t *Task) Validate() error {
 		return invalidf("task %s: backend %q", t.ID, t.Backend)
 	case !t.Importance.Valid():
 		return invalidf("task %s: importance %q", t.ID, t.Importance)
+	case !t.Permissions.Valid():
+		return invalidf("task %s: permission mode %q", t.ID, t.Permissions)
 	}
 	return nil
 }

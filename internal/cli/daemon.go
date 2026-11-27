@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ugurboz/openchef/internal/api"
+	"github.com/ugurboz/openchef/internal/app"
 	"github.com/ugurboz/openchef/internal/buildinfo"
 	"github.com/ugurboz/openchef/internal/daemon"
 )
@@ -52,7 +53,7 @@ func newDaemonRunCommand(deps Deps) *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
-			return daemon.Run(ctx, daemon.Options{Paths: paths, Version: buildinfo.Get().Version, Log: log})
+			return daemon.Run(ctx, app.Daemon(paths, buildinfo.Get().Version, log))
 		},
 	}
 }

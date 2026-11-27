@@ -186,6 +186,9 @@ func sandboxFor(mode runtime.Mode) string {
 
 func mcpServerConfig(m *runtime.MCPServer) map[string]any {
 	cfg := map[string]any{"command": m.Command, "args": m.Args}
+	if m.ToolTimeout > 0 {
+		cfg["tool_timeout_sec"] = m.ToolTimeout.Seconds()
+	}
 	if len(m.Env) > 0 {
 		env := map[string]string{}
 		for _, kv := range m.Env {

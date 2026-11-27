@@ -352,3 +352,55 @@ func FuzzSplit(f *testing.F) {
 		}
 	})
 }
+
+// Symlinks cannot launder a path: one in the workspace that leads out is judged where it
+// leads, and a denied file is denied through any link.
+func TestSymlinkedPaths(t *testing.T) {
+	t.Parallel()
+	// Rules name real paths (macOS's temp dir is under the /var -> /private/var link).
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsDir := filepath.Join(dir, "ws")
+	secret := filepath.Join(dir, "secret")
+	public := filepath.Join(dir, "public")
+	for _, d := range []string{filepath.Join(wsDir, "src"), filepath.Join(wsDir, ".git"), secret, public} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := map[string]string{
+		filepath.Join(wsDir, "src", "out"): secret,
+		filepath.Join(wsDir, "gitlink"):    filepath.Join(wsDir, ".git"),
+		filepath.Join(dir, "tmplink"):      secret,
+		filepath.Join(wsDir, "src", "pub"): public,
+	}
+	for link, target := range links {
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	e, err := NewEvaluator(Policy{Mode: runtime.ModeAcceptEdits,
+		Allow: rules(t, "Read(src/**)"),
+		Deny:  rules(t, absRule("Read", strings.TrimPrefix(filepath.ToSlash(secret), root)+"/**"))}, wsDir, home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		tool, path string
+		want       Decision
+	}{
+		{"Read", filepath.Join(wsDir, "src", "a.go"), Allow},
+		{"Read", filepath.Join(wsDir, "src", "out", "key"), Deny},  // allow rule does not follow the link out
+		{"Read", filepath.Join(wsDir, "src", "pub", "x"), Ask},     // outside: Read(src/**) does not cover it
+		{"Edit", filepath.Join(wsDir, "src", "out", "key"), Deny},  // nor may an edit
+		{"Write", filepath.Join(wsDir, "gitlink", "config"), Deny}, // .git through a link
+		{"Read", filepath.Join(dir, "tmplink", "key"), Deny},       // deny follows links outside too
+	}
+	for _, c := range cases {
+		if v := e.Evaluate(Request{Tool: c.tool, Paths: []string{c.path}}); v.Decision != c.want {
+			t.Errorf("%s %s = %s (%s); want %s", c.tool, c.path, v.Decision, v.Reason, c.want)
+		}
+	}
+}

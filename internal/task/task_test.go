@@ -140,7 +140,7 @@ func validTask(t *testing.T) Task {
 	}
 	return Task{
 		ID: id, Kind: KindRun, Status: StatusRunning, Prompt: "fix it", RepoRoot: "/repo",
-		Mode: ModeIsolated, Backend: BackendLocal, Importance: ImportanceNormal,
+		Mode: ModeIsolated, Backend: BackendLocal, Importance: ImportanceNormal, Permissions: PermissionsAcceptEdits,
 	}
 }
 

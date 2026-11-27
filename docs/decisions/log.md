@@ -293,6 +293,7 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** §16 lists `internal/task`. Tests `TestTransitionTaskConcurrent`
   (16 writers, one winner), `TestCancelRacesEngine`, `TestResumeAfterRestart`,
   `TestDoneRequiresFinishedWork`, `TestNativeIDUnique`.
+
 ## D-019 — Adapters report every process through `SessionSpec.OnSpawn`
 *2026-11-25 · M3.5 prerequisite*
 
@@ -312,6 +313,25 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
 - **Consequences:** `runtimetest.SpawnRecorder` checks the ordering against each fake
   CLI; tests `TestOnSpawnRunsBeforeFirstWrite`, `TestOnSpawnRejectKillsProcess` per
   adapter, respawn coverage in `TestStubbornInterruptKillsAndResumes`.
+
+## D-020 — M3 permission policy: file edits inside the worktree only
+*2026-11-25 · M3.8*
+
+- **Context:** `openchef run` drives real CLIs from M3 on, but the permission evaluator,
+  shell parsing and approval queue (§9) are M4. Something must answer approval requests
+  now.
+- **Options:** (a) allow everything (`bypassPermissions`); (b) allow file changes inside
+  the task's worktree, refuse commands and other tools; (c) wait for M4 before running
+  real CLIs.
+- **Challenge (self-review):** (b) blocks agents from running tests themselves, which
+  lowers first-try quality. But (a) lets an injected prompt run arbitrary commands with
+  the user's credentials, and (c) leaves M3 untestable end to end. OpenChef runs the
+  verification command itself and feeds failures back, so (b) still closes the loop.
+- **Decision:** (b): `acceptEdits` mode, invariant deny rules, an approver that allows a
+  file change only when every path is inside the worktree and outside `.git`,
+  `.openchef` and `.claude`, and denies commands/tools with an explanation; questions get
+  "decide yourself and say so". Subscription pools lose API key variables (§13).
+- **Consequences:** replaced by the M4 evaluator; until then agents cannot run tests.
 
 ## D-021 — Permission matching: parsed commands, opaque runners, redirections as file access
 *2026-11-26 · M4.1/M4.2*
@@ -340,3 +360,92 @@ Format: **Context** → **Options** → **Challenge** → **Decision** → **Con
   user's machine. A fuzz test found a parser-induced panic (`()0`), fixed and kept as a
   regression; the evaluator also recovers from panics as "ask".
 - **Consequences:** `TestBypassCorpus` (23 bypass attempts), `FuzzSplit`, mode table.
+
+## D-022 — Approval queue: durable requests, integer ids, task events, restart expiry
+*2026-11-26 · M4.3*
+
+- **Context:** §9.2 sends `ask` decisions and agent questions to one queue answerable
+  from the CLI, denied after 15 minutes. The queue must survive a daemon restart without
+  answering on behalf of an agent that is no longer waiting.
+- **Options:** (a) an in-memory queue; (b) a table (`approvals`) with compare-and-set
+  decisions and an in-memory map of waiters; for viewers, (c) a separate
+  `approval/requested` broadcast to every connection, or (d) task events on the existing
+  watch stream.
+- **Challenge (self-review):** (a) loses the audit trail and leaves `openchef approvals`
+  empty after a restart. A restarted daemon cannot hand an old answer to the agent: its
+  process was killed and the resumed turn asks again, so keeping the old row pending
+  would invite a decision that reaches no one. (c) pushes notifications to clients that
+  never read them (back-pressure on the CLI) and duplicates (d), which `run`, `logs -f`
+  and the future TUI already consume.
+- **Decision:** (b) + (d). Ids are integers (`openchef approve 3`). `Ask` blocks until
+  the user decides, the request expires (15 min → deny; a question gets "decide yourself
+  and say so"), the agent stops waiting (`withdrawn`) or the daemon stops (left pending).
+  On start, pending rows are settled `expired` by the daemon and stay listed. Requests
+  and decisions are `approval_requested` / `approval_decided` task events; `--quiet`
+  still shows requests. Summaries are stored and shown whole, multi-line commands
+  included: people approve exactly what runs. An unwatched request raises a desktop
+  notification (osascript / notify-send, arguments never through a shell; none on
+  Windows). Until M4.4 wires the evaluator, file changes are still decided by the
+  worktree rule of D-020 and everything else goes to the queue.
+- **Consequences:** `TestApprovalRoundTrip`, `TestDenyAndAnswer` (through the daemon and
+  CLI), `TestAskTimesOut`, `TestAskWithdrawnWhenAgentStops`,
+  `TestRestartExpiresPendingRequests`, `TestDecideApprovalRace`. D-020's "no shell" now
+  means "no shell without the user's approval".
+
+## D-023 — Per-task permission mode; evaluator before the queue; links judged where they lead
+*2026-11-26 · M4.4*
+
+- **Context:** §9.3 maps six modes onto three runtimes; D-020's fixed policy
+  (acceptEdits, worktree-only edits) and the M4.1 evaluator had to meet. The evaluator
+  also compared paths lexically.
+- **Options:** mode per daemon, per repository (settings only) or per task; for links,
+  lexical matching, fully resolved matching, or resolved matching only for paths that
+  leave the workspace through a link inside it.
+- **Challenge (self-review):** a per-repository mode cannot express "this one task in
+  plan mode". Fully resolved matching breaks users' absolute rules on macOS
+  (`/etc` → `/private/etc`, `/var` → `/private/var`); lexical matching lets
+  `src/out -> /` turn `Read(src/**)` into a read of anything. A bypass that a settings
+  file can switch on for every task is one committed line away from running every
+  command unasked.
+- **Decision:** the mode is stored on the task (`permission_mode`, migration 0004; older
+  rows are `acceptEdits`, the policy they ran under), chosen by `run --permission-mode`
+  or the merged settings' `defaultMode`, else `manual`. `bypassPermissions` is accepted
+  only when asked for per task and only in an isolated worktree; as a default it is
+  refused. Each session loads the settings again and builds an evaluator for its
+  worktree; private paths are OpenChef's home except `worktrees/`. The approver asks the
+  evaluator first: allow and deny are answered at once, ask goes to the queue (D-022);
+  mode changes (ExitPlanMode) always go to the user. Deny and ask rules are also passed
+  natively (Claude), after the invariants. Paths that leave the workspace through a link
+  inside it are judged where they lead; deny rules match both spellings; write
+  invariants use pathguard (case, Windows aliases).
+- **Consequences:** D-020's approver is gone. `TestApproverModeMatrix` (every mode ×
+  Claude/Codex/agy request shapes, out-of-workspace writes denied in all),
+  `TestSymlinkedPaths`, `TestSessionPolicy`, `TestRunPermissionMode`,
+  `TestPermissionModeMigration`, `TestPermissionModesMatchRuntime`. Known limit: an
+  absolute deny rule under a system link is matched as spelled and as resolved, not
+  through every alias of its ancestors.
+
+## D-024 — ask_user: a hidden `openchef mcp ask-user` per session, one tool, long timeout
+*2026-11-26 · M4.5*
+
+- **Context:** Claude's own `AskUserQuestion` is disabled (D-006), so questions need
+  OpenChef's MCP tool; Codex and agy accept the same server. A question can wait up to
+  the queue's 15 minutes, and the CLIs give MCP tool calls about a minute by default.
+- **Options:** (a) an MCP server inside the daemon on a second socket; (b) this
+  executable's hidden `mcp ask-user --task --agent` on stdio, forwarding to the daemon
+  over the existing API (`approval/ask`).
+- **Challenge (self-review):** (a) adds a listener and a second protocol to the daemon
+  and needs a way to tell which agent is asking. (b) is a process per session, but CLIs
+  start MCP servers that way anyway, the task and agent are fixed by its arguments, and
+  each question dials the daemon afresh, so a daemon restart between questions does not
+  break it. The socket is the user's own (0600), so any local process of the user could
+  already queue a question; nothing new is exposed.
+- **Decision:** (b). The server lists only `ask_user` (every listed tool is offered to
+  the model, M1 findings); questions over 4000 characters are refused; an unanswered or
+  unreachable question returns "decide yourself and say so" as a normal result. The
+  call is withdrawn when the MCP connection closes. `MCPServer.ToolTimeout` (queue
+  timeout + 1 min) becomes `MCP_TOOL_TIMEOUT` for Claude and `tool_timeout_sec` for
+  Codex; agy has no known setting.
+- **Consequences:** `TestAskUserThroughTheDaemon` (MCP client → server → daemon queue →
+  `openchef answer` → tool result), `TestHandshakeAndToolList`, `TestAskUserAnswers`,
+  `TestAskUserUnanswered`, adapter timeout tests.

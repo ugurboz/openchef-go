@@ -6,6 +6,7 @@ import (
 	goruntime "runtime"
 	"strings"
 
+	"github.com/ugurboz/openchef/internal/pathguard"
 	"github.com/ugurboz/openchef/internal/runtime"
 )
 
@@ -55,9 +56,6 @@ type Evaluator struct {
 	// invariant holds the built-in deny rules (history-rewriting git, protected dirs).
 	invariant []Rule
 }
-
-// protected are workspace directories only OpenChef writes (§8.2, §9.2).
-var protected = []string{".git", ".openchef", ".claude"}
 
 // NewEvaluator returns an evaluator for an agent working in workspace. home is the
 // user's home directory, private lists directories agents may not read at all (e.g.
@@ -241,50 +239,61 @@ func (e *Evaluator) files(tool string, paths []string) Verdict {
 	writing := editTools[tool]
 	worst := Verdict{Decision: Allow}
 	for _, raw := range paths {
-		p := e.abs(raw)
-		rel, inside := e.relative(p)
+		given := e.abs(raw)
+		// Rules and invariants see where the path really leads: a symlink in the
+		// workspace must not turn an allowed path into a way out. Deny rules also see the
+		// path as given, so either spelling of a denied file is refused.
+		p, err := pathguard.Resolve(e.workspace, given)
+		if err != nil {
+			return Verdict{Decision: Deny, Rule: "invariant: workspace", Reason: "OpenChef could not check " + given + ": " + err.Error()}
+		}
+		inside, err := pathguard.Within(e.workspace, p)
+		if err != nil {
+			return Verdict{Decision: Deny, Rule: "invariant: workspace", Reason: "OpenChef could not check " + given + ": " + err.Error()}
+		}
 		for _, dir := range e.private {
-			if within(p, dir) {
-				return Verdict{Decision: Deny, Rule: "invariant: private", Reason: "OpenChef's own files are off limits: " + p}
+			if within(p, dir) || within(given, dir) { // p is still the resolved path here
+				return Verdict{Decision: Deny, Rule: "invariant: private", Reason: "OpenChef's own files are off limits: " + given}
 			}
 		}
 		if writing {
-			if !inside {
-				return Verdict{Decision: Deny, Rule: "invariant: workspace", Reason: "only files inside the workspace may be changed: " + p}
+			why, err := pathguard.Check(e.workspace, given)
+			if err != nil {
+				return Verdict{Decision: Deny, Rule: "invariant: workspace", Reason: "OpenChef could not check " + given + ": " + err.Error()}
 			}
-			for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
-				for _, d := range protected {
-					if part == d {
-						return Verdict{Decision: Deny, Rule: "invariant: " + d, Reason: "files under " + d + " are managed by OpenChef: " + p}
-					}
-				}
+			if why != "" {
+				return Verdict{Decision: Deny, Rule: "invariant: workspace", Reason: why}
 			}
 		}
-		match := func(r *Rule) bool { return r.matchesTool(tool) && r.matchPath(p, e.workspace, e.home) }
-		if r := e.firstMatch(e.policy.Deny, match); r != nil {
-			return Verdict{Decision: Deny, Rule: r.Raw, Reason: p + " is denied by " + r.Raw}
+		match := func(path string) func(*Rule) bool {
+			return func(r *Rule) bool { return r.matchesTool(tool) && r.matchPath(path, e.workspace, e.home) }
 		}
-		if r := e.firstMatch(e.policy.Ask, match); r != nil {
-			worst = maxVerdict(worst, Verdict{Decision: Ask, Rule: r.Raw, Reason: p + " needs approval (" + r.Raw + ")"})
+		// A path that leaves the workspace through a symlink inside it is judged where it
+		// leads; other paths as the user's rules spell them (system links such as macOS
+		// /etc -> /private/etc are not the agent's doing).
+		target := p
+		if !within(given, e.workspace) || inside {
+			p = given
+		}
+		if r := e.firstMatch(e.policy.Deny, match(target)); r != nil {
+			return Verdict{Decision: Deny, Rule: r.Raw, Reason: given + " is denied by " + r.Raw}
+		}
+		if r := e.firstMatch(e.policy.Deny, match(given)); r != nil {
+			return Verdict{Decision: Deny, Rule: r.Raw, Reason: given + " is denied by " + r.Raw}
+		}
+		if r := e.firstMatch(e.policy.Ask, match(p)); r != nil {
+			worst = maxVerdict(worst, Verdict{Decision: Ask, Rule: r.Raw, Reason: given + " needs approval (" + r.Raw + ")"})
 			continue
 		}
-		if r := e.firstMatch(e.policy.Allow, match); r != nil {
+		if r := e.firstMatch(e.policy.Allow, match(p)); r != nil {
 			worst = maxVerdict(worst, Verdict{Decision: Allow, Rule: r.Raw})
 			continue
 		}
 		if !inside {
-			worst = maxVerdict(worst, Verdict{Decision: Ask, Reason: p + " is outside the workspace"})
+			worst = maxVerdict(worst, Verdict{Decision: Ask, Reason: given + " is outside the workspace"})
 		}
 	}
 	return worst
-}
-
-func (e *Evaluator) relative(p string) (string, bool) {
-	rel, err := filepath.Rel(e.workspace, p)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return rel, true
 }
 
 func within(p, dir string) bool {
